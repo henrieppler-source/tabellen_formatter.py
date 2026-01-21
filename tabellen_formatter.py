@@ -1,16 +1,20 @@
 import os
 import glob
+import re
 from copy import copy as copy_style
 from datetime import datetime
-import re
 
 import openpyxl
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, PatternFill
 
 
 # ------------------------------------------------------------
 # Konfiguration
 # ------------------------------------------------------------
+
+# Basisordner für Layouts und Ausgabedateien (relativ zum aktuellen Arbeitsverzeichnis)
+LAYOUT_DIR = "Layouts"
+OUTPUT_DIR = "Ausgabedateien"
 
 # Zuordnung: Tabellennummer -> Rohblattname
 RAW_SHEET_NAMES = {
@@ -20,24 +24,23 @@ RAW_SHEET_NAMES = {
     5: "XML-Tab5-Land",
 }
 
-# Zuordnung: Tabellennummer -> Vorlagen-Dateien (extern / intern)
-# -> Diese Dateien dienen als Layout-Vorlagen und sollten dauerhaft im Ordner liegen.
+# Zuordnung: Tabellennummer -> Layout-Dateien (nur Dateinamen, Pfad kommt über LAYOUT_DIR)
 TEMPLATES = {
     1: {
-        "ext": "Tabelle-1-Land_2025-11_g.xlsx",
-        "int": "Tabelle-1-Land_2025-11_INTERN.xlsx",
+        "ext": "Tabelle-1-Layout_g.xlsx",
+        "int": "Tabelle-1-Layout_INTERN.xlsx",
     },
     2: {
-        "ext": "Tabelle-2-Land_2025-11_g.xlsx",
-        "int": "Tabelle-2-Land_2025-11_INTERN.xlsx",
+        "ext": "Tabelle-2-Layout_g.xlsx",
+        "int": "Tabelle-2-Layout_INTERN.xlsx",
     },
     3: {
-        "ext": "Tabelle-3-Land_2025-11_g.xlsx",
-        "int": "Tabelle-3-Land_2025-11_INTERN.xlsx",
+        "ext": "Tabelle-3-Layout_g.xlsx",
+        "int": "Tabelle-3-Layout_INTERN.xlsx",
     },
     5: {
-        "ext": "Tabelle-5-Land_2025-11_g.xlsx",
-        "int": "Tabelle-5-Land_2025-11_INTERN.xlsx",
+        "ext": "Tabelle-5-Layout_g.xlsx",
+        "int": "Tabelle-5-Layout_INTERN.xlsx",
     },
 }
 
@@ -106,7 +109,6 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
         if isinstance(v, str) and "(C)opyright" in v:
             text = v
             # Jahreszahl aktualisieren
-            import re
             def repl(m):
                 return f"(C)opyright {current_year}"
             new_text = re.sub(r"\(C\)opyright\s+\d{4}", repl, text)
@@ -167,229 +169,244 @@ def get_merged_secondary_checker(ws):
     return is_secondary
 
 
+def mark_cells_with_1_or_2(ws, col_index, fill):
+    """Markiert Zellen in gegebener Spalte, falls Wert 1 oder 2 ist."""
+    max_row = ws.max_row
+    for r in range(1, max_row + 1):
+        cell = ws.cell(row=r, column=col_index)
+        v = cell.value
+        if isinstance(v, (int, float)) and v in (1, 2):
+            cell.fill = fill
+        elif isinstance(v, str) and v.strip() in ("1", "2"):
+            cell.fill = fill
+
+
 # ------------------------------------------------------------
 # Verarbeitung für Tabelle 1
 # ------------------------------------------------------------
 
-def process_table1(raw_path, tmpl_ext_path, tmpl_int_path):
-    print(f"Verarbeite Tabelle 1 aus '{raw_path}' ...")
-
+def build_table1_workbook(raw_path, template_path, internal_layout):
+    """Erzeugt eine Tabelle-1-Arbeitsmappe auf Basis einer Vorlage."""
     wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
     ws_raw = wb_raw[RAW_SHEET_NAMES[1]]
 
     month_text = extract_month_from_raw(ws_raw, 1)
     stand_text = extract_stand_from_raw(ws_raw)
 
-    # ----- EXTERN -----
-    if os.path.exists(tmpl_ext_path):
-        wb_ext = openpyxl.load_workbook(tmpl_ext_path)
-        ws_ext = wb_ext[wb_ext.sheetnames[0]]
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb[wb.sheetnames[0]]
 
-        # Monat (extern): Zeile 3, Spalte 1
-        ws_ext.cell(row=3, column=1).value = month_text
-
-        is_sec = get_merged_secondary_checker(ws_ext)
-        max_row_ext = ws_ext.max_row
-        max_col_ext = ws_ext.max_column
-
-        # Daten- und Fußnotenbereich in Roh- und Vorlagenblatt bestimmen
-        def detect_data_and_footer(ws, numeric_col=4):
-            max_row = ws.max_row
-            first_data = None
-            for r in range(1, max_row + 1):
-                v = ws.cell(row=r, column=numeric_col).value
-                if is_numeric_like(v):
-                    first_data = r
-                    break
-            if first_data is None:
-                first_data = 1
-            footnote_start = max_row + 1
-            for r in range(1, max_row + 1):
-                v = ws.cell(row=r, column=1).value
-                if isinstance(v, str) and v.strip().startswith("-"):
-                    footnote_start = r
-                    break
-            return first_data, footnote_start
-
-        fdr_raw, ft_raw = detect_data_and_footer(ws_raw, numeric_col=4)
-        fdr_ext, ft_ext = detect_data_and_footer(ws_ext, numeric_col=4)
-
-        n_rows_raw = ft_raw - fdr_raw
-        n_rows_ext = ft_ext - fdr_ext
-        n_rows = min(n_rows_raw, n_rows_ext)
-
-        for offset in range(n_rows):
-            r_raw = fdr_raw + offset
-            r_ext = fdr_ext + offset
-            for c in range(1, max_col_ext + 1):
-                if is_sec(r_ext, c):
-                    continue
-                ws_ext.cell(row=r_ext, column=c).value = ws_raw.cell(row=r_raw, column=c).value
-
-        update_footer_with_stand_and_copyright(ws_ext, stand_text)
-
-        out_ext = raw_path.replace(".xlsx", "_g.xlsx")
-        wb_ext.save(out_ext)
-        print(f"  -> Extern: {out_ext}")
+    # Monat setzen
+    if internal_layout:
+        ws.cell(row=5, column=1).value = month_text  # intern
     else:
-        print(f"  [WARNUNG] Vorlage extern für Tabelle 1 nicht gefunden: {tmpl_ext_path}")
+        ws.cell(row=3, column=1).value = month_text  # extern
 
-    # ----- INTERN -----
+    is_sec = get_merged_secondary_checker(ws)
+    max_row_ws = ws.max_row
+    max_col_ws = ws.max_column
+
+    # Daten- und Fußnotenbereich in Roh- und Vorlagenblatt bestimmen
+    def detect_data_and_footer(sheet, numeric_col=4):
+        max_row = sheet.max_row
+        first_data = None
+        for r in range(1, max_row + 1):
+            v = sheet.cell(row=r, column=numeric_col).value
+            if is_numeric_like(v):
+                first_data = r
+                break
+        if first_data is None:
+            first_data = 1
+        footnote_start = max_row + 1
+        for r in range(1, max_row + 1):
+            v = sheet.cell(row=r, column=1).value
+            if isinstance(v, str) and v.strip().startswith("-"):
+                footnote_start = r
+                break
+        return first_data, footnote_start
+
+    fdr_raw, ft_raw = detect_data_and_footer(ws_raw, numeric_col=4)
+    fdr_t, ft_t = detect_data_and_footer(ws, numeric_col=4)
+
+    n_rows_raw = ft_raw - fdr_raw
+    n_rows_t = ft_t - fdr_t
+    n_rows = min(n_rows_raw, n_rows_t)
+
+    for offset in range(n_rows):
+        r_raw = fdr_raw + offset
+        r_t = fdr_t + offset
+        for c in range(1, max_col_ws + 1):
+            if is_sec(r_t, c):
+                continue
+            ws.cell(row=r_t, column=c).value = ws_raw.cell(row=r_raw, column=c).value
+
+    update_footer_with_stand_and_copyright(ws, stand_text)
+    return wb
+
+
+def process_table1(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
+    print(f"Verarbeite Tabelle 1 aus '{raw_path}' ...")
+
+    # INTERN immer auf Basis der internen Vorlage
+    wb_int = None
     if os.path.exists(tmpl_int_path):
-        wb_int = openpyxl.load_workbook(tmpl_int_path)
-        ws_int = wb_int[wb_int.sheetnames[0]]
-
-        # Monat (intern): Zeile 5, Spalte 1
-        ws_int.cell(row=5, column=1).value = month_text
-
-        is_sec_int = get_merged_secondary_checker(ws_int)
-        max_row_int = ws_int.max_row
-        max_col_int = ws_int.max_column
-
-        def detect_data_and_footer(ws, numeric_col=4):
-            max_row = ws.max_row
-            first_data = None
-            for r in range(1, max_row + 1):
-                v = ws.cell(row=r, column=numeric_col).value
-                if is_numeric_like(v):
-                    first_data = r
-                    break
-            if first_data is None:
-                first_data = 1
-            footnote_start = max_row + 1
-            for r in range(1, max_row + 1):
-                v = ws.cell(row=r, column=1).value
-                if isinstance(v, str) and v.strip().startswith("-"):
-                    footnote_start = r
-                    break
-            return first_data, footnote_start
-
-        fdr_raw, ft_raw = detect_data_and_footer(ws_raw, numeric_col=4)
-        fdr_int, ft_int = detect_data_and_footer(ws_int, numeric_col=4)
-
-        n_rows_raw = ft_raw - fdr_raw
-        n_rows_int = ft_int - fdr_int
-        n_rows = min(n_rows_raw, n_rows_int)
-
-        for offset in range(n_rows):
-            r_raw = fdr_raw + offset
-            r_int = fdr_int + offset
-            for c in range(1, max_col_int + 1):
-                if is_sec_int(r_int, c):
-                    continue
-                ws_int.cell(row=r_int, column=c).value = ws_raw.cell(row=r_raw, column=c).value
-
-        update_footer_with_stand_and_copyright(ws_int, stand_text)
-
-        out_int = raw_path.replace(".xlsx", "_INTERN.xlsx")
+        wb_int = build_table1_workbook(raw_path, tmpl_int_path, internal_layout=True)
+        base = os.path.splitext(os.path.basename(raw_path))[0]
+        out_int = os.path.join(OUTPUT_DIR, base + "_INTERN.xlsx")
         wb_int.save(out_int)
         print(f"  -> Intern: {out_int}")
     else:
         print(f"  [WARNUNG] Vorlage intern für Tabelle 1 nicht gefunden: {tmpl_int_path}")
+
+    # EXTERN
+    if is_jj:
+        # JJ: extern identisch zu intern, aber ohne erste Zeile + Markierungen
+        if wb_int is None and os.path.exists(tmpl_int_path):
+            wb_int = build_table1_workbook(raw_path, tmpl_int_path, internal_layout=True)
+        if wb_int is not None:
+            wb_ext = wb_int
+            ws_ext = wb_ext[wb_ext.sheetnames[0]]
+            # Erste Zeile (Hinweis 'Nur für...') entfernen
+            ws_ext.cell(row=1, column=1).value = None
+
+            # Markierungen in Spalte G (7)
+            fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+            mark_cells_with_1_or_2(ws_ext, 7, fill)
+
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            wb_ext.save(out_ext)
+            print(f"  -> Extern (JJ): {out_ext}")
+    else:
+        # normaler Monat: externe Layoutvorlage
+        if os.path.exists(tmpl_ext_path):
+            wb_ext = build_table1_workbook(raw_path, tmpl_ext_path, internal_layout=False)
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            wb_ext.save(out_ext)
+            print(f"  -> Extern: {out_ext}")
+        else:
+            print(f"  [WARNUNG] Vorlage extern für Tabelle 1 nicht gefunden: {tmpl_ext_path}")
 
 
 # ------------------------------------------------------------
 # Verarbeitung für Tabelle 2 & 3 (ähnliche Struktur)
 # ------------------------------------------------------------
 
-def process_table2_or_3(table_no, raw_path, tmpl_ext_path, tmpl_int_path):
-    print(f"Verarbeite Tabelle {table_no} aus '{raw_path}' ...")
-
+def build_table2_or_3_workbook(table_no, raw_path, template_path, internal_layout):
     wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
     ws_raw = wb_raw[RAW_SHEET_NAMES[table_no]]
 
     month_text = extract_month_from_raw(ws_raw, table_no)
     stand_text = extract_stand_from_raw(ws_raw)
 
-    # Gemeinsame Funktion für Datenkopie (nur numerische Spalten ab Spalte 3)
-    def fill_numeric(ws_t, ws_raw):
-        is_sec = get_merged_secondary_checker(ws_t)
-        max_row_t = ws_t.max_row
-        max_col_t = ws_t.max_column
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb[wb.sheetnames[0]]
 
-        # Daten- & Fußnotenbereich
-        def detect_data_and_footer(ws, numeric_col=3):
-            max_row = ws.max_row
-            first_data = None
-            for r in range(1, max_row + 1):
-                v = ws.cell(row=r, column=numeric_col).value
-                if is_numeric_like(v):
-                    first_data = r
-                    break
-            if first_data is None:
-                first_data = 1
-            footnote_start = max_row + 1
-            for r in range(1, max_row + 1):
-                v = ws.cell(row=r, column=1).value
-                if isinstance(v, str) and v.strip().startswith("-"):
-                    footnote_start = r
-                    break
-            return first_data, footnote_start
-
-        fdr_raw, ft_raw = detect_data_and_footer(ws_raw, numeric_col=3)
-        fdr_t, ft_t = detect_data_and_footer(ws_t, numeric_col=3)
-
-        n_rows_raw = ft_raw - fdr_raw
-        n_rows_t = ft_t - fdr_t
-        n_rows = min(n_rows_raw, n_rows_t)
-
-        for offset in range(n_rows):
-            r_raw = fdr_raw + offset
-            r_t = fdr_t + offset
-            # Nur numerische Spalten (>=3) überschreiben, Text/Fußnoten in A/B bleiben
-            for c in range(3, max_col_t + 1):
-                if is_sec(r_t, c):
-                    continue
-                ws_t.cell(row=r_t, column=c).value = ws_raw.cell(row=r_raw, column=c).value
-
-    # ----- EXTERN -----
-    if os.path.exists(tmpl_ext_path):
-        wb_ext = openpyxl.load_workbook(tmpl_ext_path)
-        ws_ext = wb_ext[wb_ext.sheetnames[0]]
-
-        # Monat (extern): Zeile 3, Spalte 1
-        ws_ext.cell(row=3, column=1).value = month_text
-
-        fill_numeric(ws_ext, ws_raw)
-        update_footer_with_stand_and_copyright(ws_ext, stand_text)
-
-        out_ext = raw_path.replace(".xlsx", "_g.xlsx")
-        wb_ext.save(out_ext)
-        print(f"  -> Extern: {out_ext}")
+    # Monat setzen
+    if internal_layout:
+        # intern: Zeile 6, Spalte 1
+        ws.cell(row=6, column=1).value = month_text
     else:
-        print(f"  [WARNUNG] Vorlage extern für Tabelle {table_no} nicht gefunden: {tmpl_ext_path}")
+        # extern: Zeile 3, Spalte 1
+        ws.cell(row=3, column=1).value = month_text
 
-    # ----- INTERN -----
+    is_sec = get_merged_secondary_checker(ws)
+    max_row_t = ws.max_row
+    max_col_t = ws.max_column
+
+    # Daten- & Fußnotenbereich
+    def detect_data_and_footer(sheet, numeric_col=3):
+        max_row = sheet.max_row
+        first_data = None
+        for r in range(1, max_row + 1):
+            v = sheet.cell(row=r, column=numeric_col).value
+            if is_numeric_like(v):
+                first_data = r
+                break
+        if first_data is None:
+            first_data = 1
+        footnote_start = max_row + 1
+        for r in range(1, max_row + 1):
+            v = sheet.cell(row=r, column=1).value
+            if isinstance(v, str) and v.strip().startswith("-"):
+                footnote_start = r
+                break
+        return first_data, footnote_start
+
+    fdr_raw, ft_raw = detect_data_and_footer(ws_raw, numeric_col=3)
+    fdr_t, ft_t = detect_data_and_footer(ws, numeric_col=3)
+
+    n_rows_raw = ft_raw - fdr_raw
+    n_rows_t = ft_t - fdr_t
+    n_rows = min(n_rows_raw, n_rows_t)
+
+    for offset in range(n_rows):
+        r_raw = fdr_raw + offset
+        r_t = fdr_t + offset
+        # Nur numerische Spalten (>=3) überschreiben, Text/Fußnoten in A/B bleiben
+        for c in range(3, max_col_t + 1):
+            if is_sec(r_t, c):
+                continue
+            ws.cell(row=r_t, column=c).value = ws_raw.cell(row=r_raw, column=c).value
+
+    update_footer_with_stand_and_copyright(ws, stand_text)
+    return wb
+
+
+def process_table2_or_3(table_no, raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
+    print(f"Verarbeite Tabelle {table_no} aus '{raw_path}' ...")
+
+    wb_int = None
     if os.path.exists(tmpl_int_path):
-        wb_int = openpyxl.load_workbook(tmpl_int_path)
-        ws_int = wb_int[wb_int.sheetnames[0]]
-
-        # Monat (intern): Zeile 6, Spalte 1
-        ws_int.cell(row=6, column=1).value = month_text
-
-        fill_numeric(ws_int, ws_raw)
-        update_footer_with_stand_and_copyright(ws_int, stand_text)
-
-        out_int = raw_path.replace(".xlsx", "_INTERN.xlsx")
+        wb_int = build_table2_or_3_workbook(table_no, raw_path, tmpl_int_path, internal_layout=True)
+        base = os.path.splitext(os.path.basename(raw_path))[0]
+        out_int = os.path.join(OUTPUT_DIR, base + "_INTERN.xlsx")
         wb_int.save(out_int)
         print(f"  -> Intern: {out_int}")
     else:
         print(f"  [WARNUNG] Vorlage intern für Tabelle {table_no} nicht gefunden: {tmpl_int_path}")
+
+    if is_jj:
+        # JJ: extern identisch intern, ohne erste Zeile + Markierungen
+        if wb_int is None and os.path.exists(tmpl_int_path):
+            wb_int = build_table2_or_3_workbook(table_no, raw_path, tmpl_int_path, internal_layout=True)
+        if wb_int is not None:
+            wb_ext = wb_int
+            ws_ext = wb_ext[wb_ext.sheetnames[0]]
+            ws_ext.cell(row=1, column=1).value = None
+
+            # Markierungen: Tabelle 2 & 3 -> Spalte E (5)
+            fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+            mark_cells_with_1_or_2(ws_ext, 5, fill)
+
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            wb_ext.save(out_ext)
+            print(f"  -> Extern (JJ): {out_ext}")
+    else:
+        if os.path.exists(tmpl_ext_path):
+            wb_ext = build_table2_or_3_workbook(table_no, raw_path, tmpl_ext_path, internal_layout=False)
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            wb_ext.save(out_ext)
+            print(f"  -> Extern: {out_ext}")
+        else:
+            print(f"  [WARNUNG] Vorlage extern für Tabelle {table_no} nicht gefunden: {tmpl_ext_path}")
 
 
 # ------------------------------------------------------------
 # Verarbeitung für Tabelle 5 (5 Blöcke / 5 Blätter)
 # ------------------------------------------------------------
 
-def process_table5(raw_path, tmpl_ext_path, tmpl_int_path):
-    print(f"Verarbeite Tabelle 5 aus '{raw_path}' ...")
-
+def build_table5_workbook(raw_path, template_path, internal_layout):
     wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
     ws_raw = wb_raw[RAW_SHEET_NAMES[5]]
 
     month_text = extract_month_from_raw(ws_raw, 5)
     stand_text = extract_stand_from_raw(ws_raw)
 
+    wb = openpyxl.load_workbook(template_path)
     max_row = ws_raw.max_row
 
     # Blöcke finden via "Bayern x)" in Spalte B
@@ -436,47 +453,64 @@ def process_table5(raw_path, tmpl_ext_path, tmpl_int_path):
             raw_r += 1
             t_r += 1
 
-    # ----- EXTERN (5.x-Blätter) -----
-    if os.path.exists(tmpl_ext_path):
-        wb_ext = openpyxl.load_workbook(tmpl_ext_path)
+    for i, (start, end) in enumerate(block_ranges):
+        if i >= len(wb.worksheets):
+            break
+        ws_t = wb.worksheets[i]
 
-        for i, (start, end) in enumerate(block_ranges):
-            if i >= len(wb_ext.worksheets):
-                break
-            ws_t = wb_ext.worksheets[i]
-
-            # Monat extern: Zeile 3, Spalte 1
+        # Monat setzen
+        if internal_layout:
+            # intern: Zeile 5, Spalte 1
+            ws_t.cell(row=5, column=1).value = month_text
+        else:
+            # extern: Zeile 3, Spalte 1
             ws_t.cell(row=3, column=1).value = month_text
 
-            fill_sheet_from_block(ws_t, start, end)
-            update_footer_with_stand_and_copyright(ws_t, stand_text)
+        fill_sheet_from_block(ws_t, start, end)
+        update_footer_with_stand_and_copyright(ws_t, stand_text)
 
-        out_ext = raw_path.replace(".xlsx", "_g.xlsx")
-        wb_ext.save(out_ext)
-        print(f"  -> Extern: {out_ext}")
-    else:
-        print(f"  [WARNUNG] Vorlage extern für Tabelle 5 nicht gefunden: {tmpl_ext_path}")
+    return wb
 
-    # ----- INTERN (5.x-Blätter) -----
+
+def process_table5(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
+    print(f"Verarbeite Tabelle 5 aus '{raw_path}' ...")
+
+    wb_int = None
     if os.path.exists(tmpl_int_path):
-        wb_int = openpyxl.load_workbook(tmpl_int_path)
-
-        for i, (start, end) in enumerate(block_ranges):
-            if i >= len(wb_int.worksheets):
-                break
-            ws_t = wb_int.worksheets[i]
-
-            # Monat intern: Zeile 5, Spalte 1
-            ws_t.cell(row=5, column=1).value = month_text
-
-            fill_sheet_from_block(ws_t, start, end)
-            update_footer_with_stand_and_copyright(ws_t, stand_text)
-
-        out_int = raw_path.replace(".xlsx", "_INTERN.xlsx")
+        wb_int = build_table5_workbook(raw_path, tmpl_int_path, internal_layout=True)
+        base = os.path.splitext(os.path.basename(raw_path))[0]
+        out_int = os.path.join(OUTPUT_DIR, base + "_INTERN.xlsx")
         wb_int.save(out_int)
         print(f"  -> Intern: {out_int}")
     else:
         print(f"  [WARNUNG] Vorlage intern für Tabelle 5 nicht gefunden: {tmpl_int_path}")
+
+    if is_jj:
+        # JJ: extern identisch intern, ohne erste Zeile + Markierungen in Spalte F (6) auf allen Blättern
+        if wb_int is None and os.path.exists(tmpl_int_path):
+            wb_int = build_table5_workbook(raw_path, tmpl_int_path, internal_layout=True)
+        if wb_int is not None:
+            wb_ext = wb_int
+            fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+            for ws_ext in wb_ext.worksheets:
+                # Erste Zeile mit 'Nur für...' entfernen
+                ws_ext.cell(row=1, column=1).value = None
+                # Markierungen in Spalte F (6)
+                mark_cells_with_1_or_2(ws_ext, 6, fill)
+
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            wb_ext.save(out_ext)
+            print(f"  -> Extern (JJ): {out_ext}")
+    else:
+        if os.path.exists(tmpl_ext_path):
+            wb_ext = build_table5_workbook(raw_path, tmpl_ext_path, internal_layout=False)
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            wb_ext.save(out_ext)
+            print(f"  -> Extern: {out_ext}")
+        else:
+            print(f"  [WARNUNG] Vorlage extern für Tabelle 5 nicht gefunden: {tmpl_ext_path}")
 
 
 # ------------------------------------------------------------
@@ -488,6 +522,9 @@ def main():
     cwd = os.getcwd()
     print(f"Arbeitsverzeichnis: {cwd}")
     print()
+
+    # Ausgabeverzeichnis sicherstellen
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     table_numbers = [1, 2, 3, 5]
 
@@ -512,15 +549,19 @@ def main():
                 print(f"[WARNUNG] Keine Vorlagenkonfiguration für Tabelle {table_no} vorhanden.")
                 continue
 
-            tmpl_ext = tmpl_info["ext"]
-            tmpl_int = tmpl_info["int"]
+            tmpl_ext = os.path.join(LAYOUT_DIR, tmpl_info["ext"])
+            tmpl_int = os.path.join(LAYOUT_DIR, tmpl_info["int"])
+
+            # JJ-Sonderfall: Dateiname enthält '-JJ' vor der Endung
+            base_name = os.path.splitext(os.path.basename(raw_path))[0]
+            is_jj = "-JJ" in base_name
 
             if table_no == 1:
-                process_table1(raw_path, tmpl_ext, tmpl_int)
+                process_table1(raw_path, tmpl_ext, tmpl_int, is_jj)
             elif table_no in (2, 3):
-                process_table2_or_3(table_no, raw_path, tmpl_ext, tmpl_int)
+                process_table2_or_3(table_no, raw_path, tmpl_ext, tmpl_int, is_jj)
             elif table_no == 5:
-                process_table5(raw_path, tmpl_ext, tmpl_int)
+                process_table5(raw_path, tmpl_ext, tmpl_int, is_jj)
 
             print()
 
@@ -529,4 +570,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
