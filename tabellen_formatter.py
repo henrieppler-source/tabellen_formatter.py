@@ -2,6 +2,7 @@ import os
 import glob
 from copy import copy as copy_style
 from datetime import datetime
+import re
 
 import openpyxl
 from openpyxl.styles import Alignment
@@ -528,3 +529,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
