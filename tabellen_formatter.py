@@ -181,6 +181,26 @@ def mark_cells_with_1_or_2(ws, col_index, fill):
             cell.fill = fill
 
 
+def format_numeric_cells(ws):
+    """
+    Setzt für alle numerischen Zellen ein einheitliches Zahlenformat:
+    Ganzzahl mit Leerzeichen als Tausendertrennzeichen, keine Dezimalstellen.
+    0 bleibt 0, '-' (Text) bleibt unberührt.
+    """
+    thousands_format = "# ##0"
+    for row in ws.iter_rows():
+        for cell in row:
+            v = cell.value
+            if isinstance(v, (int, float)):
+                # Floats auf ganze Zahl runden
+                if isinstance(v, float):
+                    if v.is_integer():
+                        cell.value = int(v)
+                    else:
+                        cell.value = int(round(v))
+                cell.number_format = thousands_format
+
+
 # ------------------------------------------------------------
 # Verarbeitung für Tabelle 1
 # ------------------------------------------------------------
@@ -241,6 +261,7 @@ def build_table1_workbook(raw_path, template_path, internal_layout):
             ws.cell(row=r_t, column=c).value = ws_raw.cell(row=r_raw, column=c).value
 
     update_footer_with_stand_and_copyright(ws, stand_text)
+    format_numeric_cells(ws)
     return wb
 
 
@@ -351,6 +372,7 @@ def build_table2_or_3_workbook(table_no, raw_path, template_path, internal_layou
             ws.cell(row=r_t, column=c).value = ws_raw.cell(row=r_raw, column=c).value
 
     update_footer_with_stand_and_copyright(ws, stand_text)
+    format_numeric_cells(ws)
     return wb
 
 
@@ -468,6 +490,7 @@ def build_table5_workbook(raw_path, template_path, internal_layout):
 
         fill_sheet_from_block(ws_t, start, end)
         update_footer_with_stand_and_copyright(ws_t, stand_text)
+        format_numeric_cells(ws_t)
 
     return wb
 
