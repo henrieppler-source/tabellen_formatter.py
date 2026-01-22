@@ -46,7 +46,6 @@ def is_numeric_like(v):
 
 
 def extract_month_from_raw(ws, table_no):
-    # Positionslogik wie bisher bewährt
     if table_no == 1:
         return ws.cell(row=3, column=1).value
     elif table_no in (2, 3):
@@ -89,6 +88,7 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
     if not copyright_row or not stand_text:
         return
 
+    # Spalte finden, in der "Stand:" steht (falls vorhanden)
     stand_col = None
     for c in range(1, max_col + 1):
         v = ws.cell(row=copyright_row, column=c).value
@@ -104,7 +104,7 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
                 ws.cell(row=r, column=c).value = ""
 
     if stand_col is None:
-        stand_col = max_col  # Fallback
+        stand_col = max_col  # Fallback: letzte Spalte
 
     cop_cell = ws.cell(row=copyright_row, column=1)
     tgt = ws.cell(row=copyright_row, column=stand_col)
@@ -152,13 +152,14 @@ def format_numeric_cells(ws, skip_cols=None):
 
     Regeln:
     - 0 bleibt 0
-    - "-" und "X" ignorieren
-    - skip_cols: Prozent-/Kommaspalten ausschließen
+    - Zellen mit "-" oder "X" ignorieren
+    - Prozent-/Kommaspalten über skip_cols ausschließen
     - Negative Zahlen: "- " + Zahl (Minus + genau ein Leerzeichen)
     """
     if skip_cols is None:
         skip_cols = set()
 
+    # feste Gruppierung mit Leerzeichen (auch für Millionen+)
     pos = "#\\ ###\\ ###\\ ###\\ ###\\ ##0"
     neg = "-\\ " + pos
     thousands_format = f"{pos};{neg};0"
@@ -228,7 +229,6 @@ def copy_sheet_to_workbook(src_ws, tgt_wb, new_title: str):
     for row in src_ws.iter_rows():
         for cell in row:
             tgt_cell = tgt_ws.cell(row=cell.row, column=cell.column, value=cell.value)
-
             tgt_cell.font = copy_style(cell.font)
             tgt_cell.border = copy_style(cell.border)
             tgt_cell.fill = copy_style(cell.fill)
@@ -319,6 +319,7 @@ def process_table1(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
         print(f"  [WARNUNG] Vorlage intern nicht gefunden: {tmpl_int_path}")
 
     if is_jj:
+        # _g soll wie INTERN sein, nur ohne "NUR FÜR..." in Zeile 1 + Markierung
         if wb_int is None and os.path.exists(tmpl_int_path):
             wb_int = build_table1_workbook(raw_path, tmpl_int_path, internal_layout=True)
         if wb_int is not None:
@@ -358,17 +359,19 @@ def build_table2_or_3_workbook(table_no, raw_path, template_path, internal_layou
     wb = openpyxl.load_workbook(template_path)
     ws = wb[wb.sheetnames[0]]
 
+    # Datum/Textzeilen setzen + Vorlagenreste entfernen
     if internal_layout:
+        # INTERN
         ws.cell(row=6, column=1).value = month_text
     else:
-        # extern: Monat in Zeile 3
+        # EXTERN
         ws.cell(row=3, column=1).value = month_text
 
-        # FIX 1: Tabelle 2 extern – Vorlagen-Resttext in Zeile 4 entfernen
+        # Fix 1: Tabelle 2 (_g) - in Zeile 4 steht manchmal noch "November ..."
         if table_no == 2:
             ws.cell(row=4, column=1).value = None
 
-        # FIX 2: Tabelle 3 extern – Monat muss in Zeile 3 stehen und in Zeile 5 Resttext ersetzen
+        # Fix 2: Tabelle 3 (_g) - Zeile 3 muss Datum haben, Zeile 5 darf nicht "November ..." enthalten
         if table_no == 3:
             ws.cell(row=3, column=1).value = month_text
             ws.cell(row=5, column=1).value = month_text
@@ -481,7 +484,7 @@ def build_table5_workbook(raw_path, template_path, internal_layout):
 
         last_nonempty = start
         for rr in range(start, end + 1):
-            if any(ws_raw.cell(row=rr, column=c).value not in (None, "") for c in range(1, 12)):
+            if any(ws_raw.cell(row=rr, column=c).value not in (None, "") for c in range(1, 20)):
                 last_nonempty = rr
         block_ranges.append((start, last_nonempty))
 
@@ -500,8 +503,8 @@ def build_table5_workbook(raw_path, template_path, internal_layout):
         raw_r = start_row
         t_r = first_data_t
         while raw_r <= end_row and t_r <= max_row_t:
-            # FIX 3: Tabelle 5 – nicht nur C..H kopieren, sondern C..J
-            # -> damit Arbeitnehmer + Forderungen korrekt übernommen werden
+            # FIX: Tab5 muss auch Arbeitnehmer & Forderungen übernehmen (nicht nur C..H)
+            # -> wir kopieren C..J
             for c in range(3, 11):  # C..J
                 if is_sec(t_r, c):
                     continue
@@ -614,8 +617,7 @@ def build_collection_workbook(period: str, suffix: str):
     print("         Dateien:", f1, f2, f3, f5)
 
     out_wb = openpyxl.Workbook()
-    default = out_wb.active
-    out_wb.remove(default)
+    out_wb.remove(out_wb.active)
 
     for path in [f1, f2, f3]:
         wb = openpyxl.load_workbook(path)
