@@ -180,24 +180,19 @@ def mark_cells_with_1_or_2(ws, col_index, fill):
         elif isinstance(v, str) and v.strip() in ("1", "2"):
             cell.fill = fill
 
-
 def format_numeric_cells(ws):
     """
-    Setzt für alle numerischen Zellen ein einheitliches Zahlenformat:
-    Ganzzahl mit Leerzeichen als Tausendertrennzeichen, keine Dezimalstellen.
-    0 bleibt 0, '-' (Text) bleibt unberührt.
+    Ganzzahl, Tausendergruppierung (systemabhängig), keine Dezimalstellen.
+    0 bleibt 0, '-' bleibt unberührt.
     """
-    thousands_format = "# ##0"
+    thousands_format = "#,##0;-#,##0;0"
     for row in ws.iter_rows():
         for cell in row:
             v = cell.value
             if isinstance(v, (int, float)):
                 # Floats auf ganze Zahl runden
                 if isinstance(v, float):
-                    if v.is_integer():
-                        cell.value = int(v)
-                    else:
-                        cell.value = int(round(v))
+                    cell.value = int(round(v))
                 cell.number_format = thousands_format
 
 
