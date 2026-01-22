@@ -525,51 +525,43 @@ def detect_period_from_filename(filename: str) -> str | None:
 
 def copy_sheet_to_workbook(src_ws, tgt_wb, new_title: str):
     """
-    Kopiert ein komplettes Worksheet inkl. Werte, Styles, Dimensionen, Merges.
-    Damit Layout 1:1 bleibt.
+    Kopiert ein Worksheet inkl. Werte, Styles, Dimensionen und Merges.
+    (robust – ohne read-only Properties)
     """
     tgt_ws = tgt_wb.create_sheet(title=new_title)
 
-    # Sheet properties / view / page setup
-    tgt_ws.sheet_format = copy_style(src_ws.sheet_format)
-    tgt_ws.sheet_properties = copy_style(src_ws.sheet_properties)
-    tgt_ws.sheet_view = copy_style(src_ws.sheet_view)
-    tgt_ws.page_setup = copy_style(src_ws.page_setup)
-    tgt_ws.page_margins = copy_style(src_ws.page_margins)
-    tgt_ws.print_options = copy_style(src_ws.print_options)
-    tgt_ws.protection = copy_style(src_ws.protection)
-
+    # Freeze Panes
     tgt_ws.freeze_panes = src_ws.freeze_panes
 
-    # Spalten-/Zeilen-Dimensionen
+    # Spalten-Dimensionen
     for col_key, dim in src_ws.column_dimensions.items():
         tgt_ws.column_dimensions[col_key].width = dim.width
         tgt_ws.column_dimensions[col_key].hidden = dim.hidden
-        tgt_ws.column_dimensions[col_key].outline_level = dim.outline_level
-        tgt_ws.column_dimensions[col_key].collapsed = dim.collapsed
 
+    # Zeilen-Dimensionen
     for row_idx, dim in src_ws.row_dimensions.items():
         tgt_ws.row_dimensions[row_idx].height = dim.height
         tgt_ws.row_dimensions[row_idx].hidden = dim.hidden
-        tgt_ws.row_dimensions[row_idx].outline_level = dim.outline_level
-        tgt_ws.row_dimensions[row_idx].collapsed = dim.collapsed
 
     # Zellen inkl. Styles
     for row in src_ws.iter_rows():
         for cell in row:
-            tgt_cell = tgt_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            tgt_cell = tgt_ws.cell(
+                row=cell.row,
+                column=cell.column,
+                value=cell.value
+            )
             if cell.has_style:
                 tgt_cell._style = copy_style(cell._style)
             tgt_cell.number_format = cell.number_format
-            tgt_cell.protection = copy_style(cell.protection)
             tgt_cell.alignment = copy_style(cell.alignment)
+            tgt_cell.protection = copy_style(cell.protection)
 
     # Merges
     for merged_range in src_ws.merged_cells.ranges:
         tgt_ws.merge_cells(str(merged_range))
 
     return tgt_ws
-
 
 def build_collection_workbook(period: str, suffix: str):
     """
@@ -697,5 +689,6 @@ if __name__ == "__main__":
     finally:
         print("\n--- Ende der Verarbeitung ---")
         input("Bitte Eingabetaste drücken, um das Fenster zu schließen...")
+
 
 
