@@ -180,6 +180,71 @@ def format_numeric_cells(ws, skip_cols=None):
                 cell.number_format = thousands_format
 
 
+def format_percent_column(ws, col_index: int):
+    """
+    Kommaspalte (Prozentwerte ohne %-Zeichen): immer 1 Nachkommastelle,
+    außer 0 -> 0.
+    Ignoriert "-", "X" und leere Zellen.
+    """
+    pct_fmt = "0.0;-0.0;0"
+    for r in range(1, ws.max_row + 1):
+        cell = ws.cell(row=r, column=col_index)
+        v = cell.value
+        if v is None or v in ("-", "X"):
+            continue
+        if isinstance(v, (int, float)):
+            cell.number_format = pct_fmt
+
+
+# ------------------------------------------------------------
+# Copy Sheet robust (für Sammelmappen)
+# ------------------------------------------------------------
+
+def copy_sheet_to_workbook(src_ws, tgt_wb, new_title: str):
+    """
+    Kopiert ein Worksheet inkl. Werte, Dimensionen, Merges und Styles.
+    WICHTIG: Keine _style-Objekte zwischen Workbooks kopieren (openpyxl-Bugquelle).
+    """
+    tgt_ws = tgt_wb.create_sheet(title=new_title)
+
+    # Freeze Panes
+    tgt_ws.freeze_panes = src_ws.freeze_panes
+
+    # Spalten-Dimensionen
+    for col_key, dim in src_ws.column_dimensions.items():
+        tdim = tgt_ws.column_dimensions[col_key]
+        tdim.width = dim.width
+        tdim.hidden = dim.hidden
+        tdim.outline_level = dim.outline_level
+        tdim.collapsed = dim.collapsed
+
+    # Zeilen-Dimensionen
+    for row_idx, dim in src_ws.row_dimensions.items():
+        rdim = tgt_ws.row_dimensions[row_idx]
+        rdim.height = dim.height
+        rdim.hidden = dim.hidden
+        rdim.outline_level = dim.outline_level
+        rdim.collapsed = dim.collapsed
+
+    # Zellen inkl. Styles (sauber, ohne _style)
+    for row in src_ws.iter_rows():
+        for cell in row:
+            tgt_cell = tgt_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+
+            tgt_cell.font = copy_style(cell.font)
+            tgt_cell.border = copy_style(cell.border)
+            tgt_cell.fill = copy_style(cell.fill)
+            tgt_cell.number_format = cell.number_format
+            tgt_cell.protection = copy_style(cell.protection)
+            tgt_cell.alignment = copy_style(cell.alignment)
+
+    # Merges
+    for merged_range in src_ws.merged_cells.ranges:
+        tgt_ws.merge_cells(str(merged_range))
+
+    return tgt_ws
+
+
 # ------------------------------------------------------------
 # Tabelle 1
 # ------------------------------------------------------------
@@ -235,7 +300,8 @@ def build_table1_workbook(raw_path, template_path, internal_layout):
 
     update_footer_with_stand_and_copyright(ws, stand_text)
 
-    # Tabelle 1: Spalte I (9) ist Kommazahl/„Prozent“ -> NICHT formatieren
+    # Tabelle 1: Spalte I (9) = Kommaspalte
+    format_percent_column(ws, 9)
     format_numeric_cells(ws, skip_cols={9})
 
     return wb
@@ -335,7 +401,8 @@ def build_table2_or_3_workbook(table_no, raw_path, template_path, internal_layou
 
     update_footer_with_stand_and_copyright(ws, stand_text)
 
-    # Tabelle 2 & 3: Spalte G (7) ist Kommazahl/„Prozent“ -> NICHT formatieren
+    # Tabelle 2/3: Spalte G (7) = Kommaspalte
+    format_percent_column(ws, 7)
     format_numeric_cells(ws, skip_cols={7})
 
     return wb
@@ -445,7 +512,8 @@ def build_table5_workbook(raw_path, template_path, internal_layout):
         fill_sheet_from_block(ws_t, start, end)
         update_footer_with_stand_and_copyright(ws_t, stand_text)
 
-        # Tabelle 5: Spalte H (8) ist Kommazahl/„Prozent“ -> NICHT formatieren
+        # Tabelle 5: Spalte H (8) = Kommaspalte
+        format_percent_column(ws_t, 8)
         format_numeric_cells(ws_t, skip_cols={8})
 
     return wb
@@ -494,14 +562,7 @@ def process_table5(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
 # Sammelmappen erzeugen
 # ------------------------------------------------------------
 
-def detect_period_from_filename(filename: str) -> str | None:
-    """
-    Erkennt Periode aus Dateinamen:
-      - YYYY-MM
-      - YYYY-Q[1-4]
-      - YYYY-H[1-2]
-      - YYYY-JJ
-    """
+def detect_period_from_filename(filename: str):
     name = os.path.basename(filename)
 
     m = re.search(r"(20\d{2}-(?:0[1-9]|1[0-2]))", name)
@@ -523,62 +584,7 @@ def detect_period_from_filename(filename: str) -> str | None:
     return None
 
 
-from copy import copy as copy_style
-
-def copy_sheet_to_workbook(src_ws, tgt_wb, new_title: str):
-    """
-    Kopiert ein Worksheet inkl. Werte, Dimensionen, Merges und Styles.
-    WICHTIG: Keine _style-Objekte zwischen Workbooks kopieren (openpyxl-Bugquelle).
-    """
-    tgt_ws = tgt_wb.create_sheet(title=new_title)
-
-    # Freeze Panes
-    tgt_ws.freeze_panes = src_ws.freeze_panes
-
-    # Spalten-Dimensionen
-    for col_key, dim in src_ws.column_dimensions.items():
-        tdim = tgt_ws.column_dimensions[col_key]
-        tdim.width = dim.width
-        tdim.hidden = dim.hidden
-        tdim.outline_level = dim.outline_level
-        tdim.collapsed = dim.collapsed
-
-    # Zeilen-Dimensionen
-    for row_idx, dim in src_ws.row_dimensions.items():
-        rdim = tgt_ws.row_dimensions[row_idx]
-        rdim.height = dim.height
-        rdim.hidden = dim.hidden
-        rdim.outline_level = dim.outline_level
-        rdim.collapsed = dim.collapsed
-
-    # Zellen inkl. Styles (sauber, ohne _style)
-    for row in src_ws.iter_rows():
-        for cell in row:
-            tgt_cell = tgt_ws.cell(row=cell.row, column=cell.column, value=cell.value)
-
-            # Styles einzeln kopieren (robust)
-            tgt_cell.font = copy_style(cell.font)
-            tgt_cell.border = copy_style(cell.border)
-            tgt_cell.fill = copy_style(cell.fill)
-            tgt_cell.number_format = cell.number_format
-            tgt_cell.protection = copy_style(cell.protection)
-            tgt_cell.alignment = copy_style(cell.alignment)
-
-    # Merges
-    for merged_range in src_ws.merged_cells.ranges:
-        tgt_ws.merge_cells(str(merged_range))
-
-    return tgt_ws
-
-
 def build_collection_workbook(period: str, suffix: str):
-    """
-    suffix: "_g" oder "_INTERN"
-    baut:
-      INSO_Land_<period>_SAMMEL_g.xlsx
-      INSO_Land_<period>_SAMMEL_INTERN.xlsx
-    """
-
     def find_one(table_no):
         pattern = os.path.join(OUTPUT_DIR, f"Tabelle-{table_no}-Land_*{period}*{suffix}.xlsx")
         hits = sorted(glob.glob(pattern))
@@ -594,7 +600,6 @@ def build_collection_workbook(period: str, suffix: str):
         print(f"[SAMMEL] Periode {period} ({suffix}): fehlende Dateien für Tabellen {missing} – Sammelmappe wird übersprungen.")
         return
 
-    # ✅ Debug: gleich am Anfang, wenn klar ist, dass alles da ist
     print(f"[SAMMEL] baue Periode={period}, Typ={suffix}")
     print("         Dateien:", f1, f2, f3, f5)
 
@@ -602,13 +607,11 @@ def build_collection_workbook(period: str, suffix: str):
     default = out_wb.active
     out_wb.remove(default)
 
-    # Reihenfolge 1/2/3
     for path in [f1, f2, f3]:
         wb = openpyxl.load_workbook(path)
         ws = wb[wb.sheetnames[0]]
         copy_sheet_to_workbook(ws, out_wb, ws.title)
 
-    # Tabelle 5: alle Blätter übernehmen
     wb5 = openpyxl.load_workbook(f5)
     for ws in wb5.worksheets:
         copy_sheet_to_workbook(ws, out_wb, ws.title)
@@ -616,16 +619,12 @@ def build_collection_workbook(period: str, suffix: str):
     tag = "g" if suffix == "_g" else "INTERN"
     out_path = os.path.join(OUTPUT_DIR, f"INSO_Land_{period}_SAMMEL_{tag}.xlsx")
 
-    # ✅ Debug: direkt vor dem Speichern
     print(f"[SAMMEL] speichere: {out_path}")
     out_wb.save(out_path)
     print(f"[SAMMEL] erstellt:  {out_path}")
 
+
 def build_all_collections():
-    """
-    Findet alle Perioden, die in Ausgabedateien vorkommen,
-    und erstellt pro Periode je eine Sammelmappe für _g und _INTERN.
-    """
     files = glob.glob(os.path.join(OUTPUT_DIR, "*.xlsx"))
     periods = set()
 
@@ -684,7 +683,6 @@ def main():
 
             print()
 
-    # Sammelmappen pro Periode erzeugen
     print("Erzeuge Sammelmappen pro Periode (_g / _INTERN)...")
     build_all_collections()
 
@@ -700,7 +698,3 @@ if __name__ == "__main__":
     finally:
         print("\n--- Ende der Verarbeitung ---")
         input("Bitte Eingabetaste drücken, um das Fenster zu schließen...")
-
-
-
-
