@@ -523,10 +523,12 @@ def detect_period_from_filename(filename: str) -> str | None:
     return None
 
 
+from copy import copy as copy_style
+
 def copy_sheet_to_workbook(src_ws, tgt_wb, new_title: str):
     """
-    Kopiert ein Worksheet inkl. Werte, Styles, Dimensionen und Merges.
-    (robust – ohne read-only Properties)
+    Kopiert ein Worksheet inkl. Werte, Dimensionen, Merges und Styles.
+    WICHTIG: Keine _style-Objekte zwischen Workbooks kopieren (openpyxl-Bugquelle).
     """
     tgt_ws = tgt_wb.create_sheet(title=new_title)
 
@@ -535,33 +537,39 @@ def copy_sheet_to_workbook(src_ws, tgt_wb, new_title: str):
 
     # Spalten-Dimensionen
     for col_key, dim in src_ws.column_dimensions.items():
-        tgt_ws.column_dimensions[col_key].width = dim.width
-        tgt_ws.column_dimensions[col_key].hidden = dim.hidden
+        tdim = tgt_ws.column_dimensions[col_key]
+        tdim.width = dim.width
+        tdim.hidden = dim.hidden
+        tdim.outline_level = dim.outline_level
+        tdim.collapsed = dim.collapsed
 
     # Zeilen-Dimensionen
     for row_idx, dim in src_ws.row_dimensions.items():
-        tgt_ws.row_dimensions[row_idx].height = dim.height
-        tgt_ws.row_dimensions[row_idx].hidden = dim.hidden
+        rdim = tgt_ws.row_dimensions[row_idx]
+        rdim.height = dim.height
+        rdim.hidden = dim.hidden
+        rdim.outline_level = dim.outline_level
+        rdim.collapsed = dim.collapsed
 
-    # Zellen inkl. Styles
+    # Zellen inkl. Styles (sauber, ohne _style)
     for row in src_ws.iter_rows():
         for cell in row:
-            tgt_cell = tgt_ws.cell(
-                row=cell.row,
-                column=cell.column,
-                value=cell.value
-            )
-            if cell.has_style:
-                tgt_cell._style = copy_style(cell._style)
+            tgt_cell = tgt_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+
+            # Styles einzeln kopieren (robust)
+            tgt_cell.font = copy_style(cell.font)
+            tgt_cell.border = copy_style(cell.border)
+            tgt_cell.fill = copy_style(cell.fill)
             tgt_cell.number_format = cell.number_format
-            tgt_cell.alignment = copy_style(cell.alignment)
             tgt_cell.protection = copy_style(cell.protection)
+            tgt_cell.alignment = copy_style(cell.alignment)
 
     # Merges
     for merged_range in src_ws.merged_cells.ranges:
         tgt_ws.merge_cells(str(merged_range))
 
     return tgt_ws
+
 
 def build_collection_workbook(period: str, suffix: str):
     """
@@ -570,7 +578,7 @@ def build_collection_workbook(period: str, suffix: str):
       INSO_Land_<period>_SAMMEL_g.xlsx
       INSO_Land_<period>_SAMMEL_INTERN.xlsx
     """
-    # Dateien pro Tabelle suchen
+
     def find_one(table_no):
         pattern = os.path.join(OUTPUT_DIR, f"Tabelle-{table_no}-Land_*{period}*{suffix}.xlsx")
         hits = sorted(glob.glob(pattern))
@@ -586,29 +594,32 @@ def build_collection_workbook(period: str, suffix: str):
         print(f"[SAMMEL] Periode {period} ({suffix}): fehlende Dateien für Tabellen {missing} – Sammelmappe wird übersprungen.")
         return
 
-    # Zielmappe anlegen
+    # ✅ Debug: gleich am Anfang, wenn klar ist, dass alles da ist
+    print(f"[SAMMEL] baue Periode={period}, Typ={suffix}")
+    print("         Dateien:", f1, f2, f3, f5)
+
     out_wb = openpyxl.Workbook()
-    # Default-Sheet löschen
     default = out_wb.active
     out_wb.remove(default)
 
-    # Reihenfolge 1/2/3/5
+    # Reihenfolge 1/2/3
     for path in [f1, f2, f3]:
         wb = openpyxl.load_workbook(path)
         ws = wb[wb.sheetnames[0]]
         copy_sheet_to_workbook(ws, out_wb, ws.title)
 
-    # Tabelle 5: alle Blätter 1:1 übernehmen
+    # Tabelle 5: alle Blätter übernehmen
     wb5 = openpyxl.load_workbook(f5)
     for ws in wb5.worksheets:
         copy_sheet_to_workbook(ws, out_wb, ws.title)
 
-    # Dateiname
     tag = "g" if suffix == "_g" else "INTERN"
     out_path = os.path.join(OUTPUT_DIR, f"INSO_Land_{period}_SAMMEL_{tag}.xlsx")
-    out_wb.save(out_path)
-    print(f"[SAMMEL] erstellt: {out_path}")
 
+    # ✅ Debug: direkt vor dem Speichern
+    print(f"[SAMMEL] speichere: {out_path}")
+    out_wb.save(out_path)
+    print(f"[SAMMEL] erstellt:  {out_path}")
 
 def build_all_collections():
     """
@@ -689,6 +700,7 @@ if __name__ == "__main__":
     finally:
         print("\n--- Ende der Verarbeitung ---")
         input("Bitte Eingabetaste drücken, um das Fenster zu schließen...")
+
 
 
 
