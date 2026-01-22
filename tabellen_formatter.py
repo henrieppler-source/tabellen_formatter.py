@@ -689,4 +689,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print("\nFEHLER AUFGETRETEN:")
+        print(e)
+    finally:
+        print("\n--- Ende der Verarbeitung ---")
+        input("Bitte Eingabetaste drücken, um das Fenster zu schließen...")
+
+
