@@ -46,6 +46,7 @@ def is_numeric_like(v):
 
 
 def extract_month_from_raw(ws, table_no):
+    # Positionslogik wie bisher bewährt
     if table_no == 1:
         return ws.cell(row=3, column=1).value
     elif table_no in (2, 3):
@@ -146,21 +147,18 @@ def mark_cells_with_1_or_2(ws, col_index, fill):
 
 def format_numeric_cells(ws, skip_cols=None):
     """
-    Ganzzahlen mit festem Leerzeichen als Tausendertrennzeichen
-    (auch bei Millionen+), ohne Dezimalstellen.
+    Ganzzahlen mit festem Leerzeichen als Tausendertrennzeichen,
+    ohne Dezimalstellen.
 
     Regeln:
     - 0 bleibt 0
-    - Zellen mit "-" (Text) werden ignoriert
-    - Zellen mit "X" (Text) werden ignoriert
-    - Prozent-/Kommaspalten werden über skip_cols ausgeschlossen
+    - "-" und "X" ignorieren
+    - skip_cols: Prozent-/Kommaspalten ausschließen
     - Negative Zahlen: "- " + Zahl (Minus + genau ein Leerzeichen)
     """
     if skip_cols is None:
         skip_cols = set()
 
-    # Gruppierung mit fixem Leerzeichen bis sehr große Zahlen:
-    # z.B. 17 982 291
     pos = "#\\ ###\\ ###\\ ###\\ ###\\ ##0"
     neg = "-\\ " + pos
     thousands_format = f"{pos};{neg};0"
@@ -363,7 +361,17 @@ def build_table2_or_3_workbook(table_no, raw_path, template_path, internal_layou
     if internal_layout:
         ws.cell(row=6, column=1).value = month_text
     else:
+        # extern: Monat in Zeile 3
         ws.cell(row=3, column=1).value = month_text
+
+        # FIX 1: Tabelle 2 extern – Vorlagen-Resttext in Zeile 4 entfernen
+        if table_no == 2:
+            ws.cell(row=4, column=1).value = None
+
+        # FIX 2: Tabelle 3 extern – Monat muss in Zeile 3 stehen und in Zeile 5 Resttext ersetzen
+        if table_no == 3:
+            ws.cell(row=3, column=1).value = month_text
+            ws.cell(row=5, column=1).value = month_text
 
     is_sec = get_merged_secondary_checker(ws)
     max_col_t = ws.max_column
@@ -473,7 +481,7 @@ def build_table5_workbook(raw_path, template_path, internal_layout):
 
         last_nonempty = start
         for rr in range(start, end + 1):
-            if any(ws_raw.cell(row=rr, column=c).value not in (None, "") for c in range(1, 10)):
+            if any(ws_raw.cell(row=rr, column=c).value not in (None, "") for c in range(1, 12)):
                 last_nonempty = rr
         block_ranges.append((start, last_nonempty))
 
@@ -492,7 +500,9 @@ def build_table5_workbook(raw_path, template_path, internal_layout):
         raw_r = start_row
         t_r = first_data_t
         while raw_r <= end_row and t_r <= max_row_t:
-            for c in range(3, 9):  # C..H
+            # FIX 3: Tabelle 5 – nicht nur C..H kopieren, sondern C..J
+            # -> damit Arbeitnehmer + Forderungen korrekt übernommen werden
+            for c in range(3, 11):  # C..J
                 if is_sec(t_r, c):
                     continue
                 ws_t.cell(row=t_r, column=c).value = ws_raw.cell(row=raw_r, column=c).value
