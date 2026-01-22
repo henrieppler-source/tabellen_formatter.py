@@ -185,7 +185,7 @@ def format_numeric_cells(ws):
     Ganzzahl mit festem Leerzeichen als Tausendertrennzeichen,
     ohne Dezimalstellen. 0 bleibt 0, '-' bleibt unberührt.
     """
-    thousands_format = "#\\ ##0;-#\\ ##0;0"
+    thousands_format = "#\\ ###\\ ###\\ ###\\ ###\\ ##0;-#\\ ###\\ ###\\ ###\\ ###\\ ##0;0"
 
     for row in ws.iter_rows():
         for cell in row:
@@ -589,4 +589,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
