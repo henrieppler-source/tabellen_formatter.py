@@ -29,10 +29,23 @@ TEMPLATES = {
     5: {"ext": "Tabelle-5-Layout_g.xlsx", "int": "Tabelle-5-Layout_INTERN.xlsx"},
 }
 
+INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
+
 
 # ------------------------------------------------------------
-# Hilfsfunktionen
+# Hilfsfunktionen (Allgemein)
 # ------------------------------------------------------------
+
+def load_layout(path: str) -> openpyxl.Workbook:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Layoutdatei nicht gefunden: {path}")
+    return openpyxl.load_workbook(path)
+
+
+def out_path_for(raw_path: str, suffix: str) -> str:
+    base = os.path.splitext(os.path.basename(raw_path))[0]
+    return os.path.join(OUTPUT_DIR, f"{base}{suffix}.xlsx")
+
 
 def is_numeric_like(v):
     if v is None:
@@ -40,22 +53,36 @@ def is_numeric_like(v):
     if isinstance(v, (int, float)):
         return True
     if isinstance(v, str):
-        s = v.strip().replace(".", "").replace(",", "")
-        return s.isdigit() or v.strip() in ["-", "X"]
+        s = v.strip()
+        if s in ("-", "X"):
+            return True
+        s2 = s.replace(".", "").replace(",", "")
+        return s2.isdigit()
     return False
 
 
-def extract_month_from_raw(ws, table_no):
-    if table_no == 1:
-        return ws.cell(row=3, column=1).value
-    elif table_no in (2, 3):
-        return ws.cell(row=4, column=1).value
-    elif table_no == 5:
-        return ws.cell(row=3, column=1).value
-    return None
+GER_MONTHS = (
+    "Januar", "Februar", "März", "Maerz", "April", "Mai", "Juni",
+    "Juli", "August", "September", "Oktober", "November", "Dezember"
+)
+
+def find_month_text(ws, search_rows=15):
+    """
+    Sucht in Spalte A (col 1) in den ersten Zeilen nach einem Eintrag wie "Dezember 2025".
+    Nimmt den letzten Treffer (falls z.B. alte Zeile noch drinsteht).
+    """
+    hits = []
+    for r in range(1, min(search_rows, ws.max_row) + 1):
+        v = ws.cell(row=r, column=1).value
+        if isinstance(v, str):
+            s = v.strip()
+            # Treffer, wenn Monatsname + Jahr vorkommt
+            if re.search(r"(20\d{2})", s) and any(m in s for m in GER_MONTHS):
+                hits.append(s)
+    return hits[-1] if hits else None
 
 
-def extract_stand_from_raw(ws, max_search_rows=40):
+def extract_stand_from_raw(ws, max_search_rows=60):
     max_row = ws.max_row
     max_col = ws.max_column
     for r in range(max_row, max(max_row - max_search_rows, 1) - 1, -1):
@@ -75,42 +102,40 @@ def update_footer_with_stand_and_copyright(ws, stand_text):
     for r in range(max_row, 0, -1):
         v = ws.cell(row=r, column=1).value
         if isinstance(v, str) and "(C)opyright" in v:
-            text = v
-
-            def repl(_m):
-                return f"(C)opyright {current_year}"
-
-            new_text = re.sub(r"\(C\)opyright\s+\d{4}", repl, text)
+            # Jahr ersetzen
+            new_text = re.sub(r"\(C\)opyright\s+\d{4}", f"(C)opyright {current_year}", v)
             ws.cell(row=r, column=1).value = new_text
             copyright_row = r
             break
 
-    if not copyright_row or not stand_text:
+    if not copyright_row:
         return
 
-    # Spalte finden, in der "Stand:" steht (falls vorhanden)
-    stand_col = None
-    for c in range(1, max_col + 1):
-        v = ws.cell(row=copyright_row, column=c).value
-        if isinstance(v, str) and "Stand:" in v:
-            stand_col = c
-            break
-
-    # Entferne andere "Stand:"-Vorkommen (außer in Copyright-Zeile)
+    # andere Stand:-Zeilen (außer Copyright-Zeile) leeren
     for r in range(1, max_row + 1):
         for c in range(1, max_col + 1):
             v = ws.cell(row=r, column=c).value
             if isinstance(v, str) and v.strip().startswith("Stand:") and r != copyright_row:
                 ws.cell(row=r, column=c).value = ""
 
+    if not stand_text:
+        return
+
+    # Stand-Spalte suchen (falls im Layout schon vorhanden), sonst letzte Spalte
+    stand_col = None
+    for c in range(1, max_col + 1):
+        v = ws.cell(row=copyright_row, column=c).value
+        if isinstance(v, str) and "Stand:" in v:
+            stand_col = c
+            break
     if stand_col is None:
-        stand_col = max_col  # Fallback: letzte Spalte
+        stand_col = max_col
 
     cop_cell = ws.cell(row=copyright_row, column=1)
     tgt = ws.cell(row=copyright_row, column=stand_col)
     tgt.value = stand_text
 
-    # Stil wie Copyright
+    # Stil wie Copyright + rechtsbündig
     tgt.font = copy_style(cop_cell.font)
     tgt.border = copy_style(cop_cell.border)
     tgt.fill = copy_style(cop_cell.fill)
@@ -135,8 +160,7 @@ def get_merged_secondary_checker(ws):
 
 
 def mark_cells_with_1_or_2(ws, col_index, fill):
-    max_row = ws.max_row
-    for r in range(1, max_row + 1):
+    for r in range(1, ws.max_row + 1):
         cell = ws.cell(row=r, column=col_index)
         v = cell.value
         if isinstance(v, (int, float)) and v in (1, 2):
@@ -147,19 +171,15 @@ def mark_cells_with_1_or_2(ws, col_index, fill):
 
 def format_numeric_cells(ws, skip_cols=None):
     """
-    Ganzzahlen mit festem Leerzeichen als Tausendertrennzeichen,
-    ohne Dezimalstellen.
-
-    Regeln:
+    Ganzzahlen mit Leerzeichen als Tausendertrennzeichen, ohne Dezimalstellen.
     - 0 bleibt 0
-    - Zellen mit "-" oder "X" ignorieren
-    - Prozent-/Kommaspalten über skip_cols ausschließen
-    - Negative Zahlen: "- " + Zahl (Minus + genau ein Leerzeichen)
+    - "-" / "X" ignorieren
+    - Negative: "- " + Zahl (Minus + genau ein Leerzeichen)
     """
     if skip_cols is None:
         skip_cols = set()
 
-    # feste Gruppierung mit Leerzeichen (auch für Millionen+)
+    # gruppiert auch für Millionen+ mit Leerzeichen
     pos = "#\\ ###\\ ###\\ ###\\ ###\\ ##0"
     neg = "-\\ " + pos
     thousands_format = f"{pos};{neg};0"
@@ -170,7 +190,7 @@ def format_numeric_cells(ws, skip_cols=None):
                 continue
 
             v = cell.value
-            if v in ("-", "X"):
+            if v in ("-", "X") or v is None:
                 continue
 
             if isinstance(v, (int, float)):
@@ -181,9 +201,10 @@ def format_numeric_cells(ws, skip_cols=None):
 
 def format_percent_column(ws, col_index: int):
     """
-    Kommaspalte (Prozentwerte ohne %-Zeichen): immer 1 Nachkommastelle,
-    außer 0 -> 0.
-    Ignoriert "-", "X" und leere Zellen.
+    Prozentwerte ohne %-Zeichen:
+    - immer 1 Nachkommastelle,
+    - außer 0 -> 0
+    - "-" / "X" ignorieren
     """
     pct_fmt = "0.0;-0.0;0"
     for r in range(1, ws.max_row + 1):
@@ -200,16 +221,10 @@ def format_percent_column(ws, col_index: int):
 # ------------------------------------------------------------
 
 def copy_sheet_to_workbook(src_ws, tgt_wb, new_title: str):
-    """
-    Kopiert ein Worksheet inkl. Werte, Dimensionen, Merges und Styles.
-    WICHTIG: Keine _style-Objekte zwischen Workbooks kopieren (openpyxl-Bugquelle).
-    """
     tgt_ws = tgt_wb.create_sheet(title=new_title)
 
-    # Freeze Panes
     tgt_ws.freeze_panes = src_ws.freeze_panes
 
-    # Spalten-Dimensionen
     for col_key, dim in src_ws.column_dimensions.items():
         tdim = tgt_ws.column_dimensions[col_key]
         tdim.width = dim.width
@@ -217,7 +232,6 @@ def copy_sheet_to_workbook(src_ws, tgt_wb, new_title: str):
         tdim.outline_level = dim.outline_level
         tdim.collapsed = dim.collapsed
 
-    # Zeilen-Dimensionen
     for row_idx, dim in src_ws.row_dimensions.items():
         rdim = tgt_ws.row_dimensions[row_idx]
         rdim.height = dim.height
@@ -225,7 +239,6 @@ def copy_sheet_to_workbook(src_ws, tgt_wb, new_title: str):
         rdim.outline_level = dim.outline_level
         rdim.collapsed = dim.collapsed
 
-    # Zellen inkl. Styles (sauber, ohne _style)
     for row in src_ws.iter_rows():
         for cell in row:
             tgt_cell = tgt_ws.cell(row=cell.row, column=cell.column, value=cell.value)
@@ -236,7 +249,6 @@ def copy_sheet_to_workbook(src_ws, tgt_wb, new_title: str):
             tgt_cell.protection = copy_style(cell.protection)
             tgt_cell.alignment = copy_style(cell.alignment)
 
-    # Merges
     for merged_range in src_ws.merged_cells.ranges:
         tgt_ws.merge_cells(str(merged_range))
 
@@ -251,12 +263,13 @@ def build_table1_workbook(raw_path, template_path, internal_layout):
     wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
     ws_raw = wb_raw[RAW_SHEET_NAMES[1]]
 
-    month_text = extract_month_from_raw(ws_raw, 1)
+    month_text = find_month_text(ws_raw)
     stand_text = extract_stand_from_raw(ws_raw)
 
     wb = openpyxl.load_workbook(template_path)
     ws = wb[wb.sheetnames[0]]
 
+    # Monatszeile setzen (wie bisher)
     if internal_layout:
         ws.cell(row=5, column=1).value = month_text
     else:
@@ -265,16 +278,22 @@ def build_table1_workbook(raw_path, template_path, internal_layout):
     is_sec = get_merged_secondary_checker(ws)
     max_col_ws = ws.max_column
 
-    def detect_data_and_footer(sheet, numeric_col=4):
+    def detect_data_and_footer(sheet):
         max_row = sheet.max_row
+
+        # Datenstart: erste Zeile, wo irgendwo (ab Spalte B) ein numerischer Wert vorkommt
         first_data = None
         for r in range(1, max_row + 1):
-            if is_numeric_like(sheet.cell(row=r, column=numeric_col).value):
-                first_data = r
+            for c in range(2, sheet.max_column + 1):
+                if is_numeric_like(sheet.cell(row=r, column=c).value):
+                    first_data = r
+                    break
+            if first_data:
                 break
         if first_data is None:
             first_data = 1
 
+        # Fußnotenstart: erste Zeile mit "- ..."
         footnote_start = max_row + 1
         for r in range(1, max_row + 1):
             v = sheet.cell(row=r, column=1).value
@@ -283,8 +302,8 @@ def build_table1_workbook(raw_path, template_path, internal_layout):
                 break
         return first_data, footnote_start
 
-    fdr_raw, ft_raw = detect_data_and_footer(ws_raw, numeric_col=4)
-    fdr_t, ft_t = detect_data_and_footer(ws, numeric_col=4)
+    fdr_raw, ft_raw = detect_data_and_footer(ws_raw)
+    fdr_t, ft_t = detect_data_and_footer(ws)
 
     n_rows = min(ft_raw - fdr_raw, ft_t - fdr_t)
 
@@ -311,15 +330,13 @@ def process_table1(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
     wb_int = None
     if os.path.exists(tmpl_int_path):
         wb_int = build_table1_workbook(raw_path, tmpl_int_path, internal_layout=True)
-        base = os.path.splitext(os.path.basename(raw_path))[0]
-        out_int = os.path.join(OUTPUT_DIR, base + "_INTERN.xlsx")
+        out_int = out_path_for(raw_path, "_INTERN")
         wb_int.save(out_int)
         print(f"  -> Intern: {out_int}")
     else:
         print(f"  [WARNUNG] Vorlage intern nicht gefunden: {tmpl_int_path}")
 
     if is_jj:
-        # _g soll wie INTERN sein, nur ohne "NUR FÜR..." in Zeile 1 + Markierung
         if wb_int is None and os.path.exists(tmpl_int_path):
             wb_int = build_table1_workbook(raw_path, tmpl_int_path, internal_layout=True)
         if wb_int is not None:
@@ -330,15 +347,13 @@ def process_table1(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
             fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
             mark_cells_with_1_or_2(ws_ext, 7, fill)  # Tabelle 1: Spalte G
 
-            base = os.path.splitext(os.path.basename(raw_path))[0]
-            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            out_ext = out_path_for(raw_path, "_g")
             wb_ext.save(out_ext)
             print(f"  -> Extern (JJ): {out_ext}")
     else:
         if os.path.exists(tmpl_ext_path):
             wb_ext = build_table1_workbook(raw_path, tmpl_ext_path, internal_layout=False)
-            base = os.path.splitext(os.path.basename(raw_path))[0]
-            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            out_ext = out_path_for(raw_path, "_g")
             wb_ext.save(out_ext)
             print(f"  -> Extern: {out_ext}")
         else:
@@ -346,28 +361,32 @@ def process_table1(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
 
 
 # ------------------------------------------------------------
-# Tabelle 2 & 3  (WICHTIG: FIX = ab Spalte B kopieren!)
+# Tabelle 2 & 3
 # ------------------------------------------------------------
 
-def process_table2_or_3(table_no, raw_path, tmpl_ext, tmpl_int):
+def process_table2_or_3(table_no, raw_path, tmpl_ext, tmpl_int, is_jj):
     print(f"Verarbeite Tabelle {table_no} aus '{os.path.basename(raw_path)}' ...")
 
     wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
     ws_raw = wb_raw[RAW_SHEET_NAMES[table_no]]
 
-    month_text = extract_month_from_raw(ws_raw, table_no)
+    month_text = find_month_text(ws_raw)
     stand_text = extract_stand_from_raw(ws_raw)
 
-    # FIX: Startspalte = 2 (Spalte B)  -> damit Spalte B nicht aus Layout bleibt
-    START_COL = 2
+    # Wir wollen ab Spalte B übernehmen, aber Datenstart NICHT über Spalte B erkennen (die ist Text)
+    START_COL_COPY = 2  # B
 
-    def detect_data_and_footer(ws, numeric_col):
+    def detect_data_and_footer(ws):
         max_row = ws.max_row
+
+        # Datenstart: erste Zeile, wo irgendwo (ab Spalte C) ein numerischer Wert vorkommt
         first_data = None
         for r in range(1, max_row + 1):
-            v = ws.cell(row=r, column=numeric_col).value
-            if is_numeric_like(v):
-                first_data = r
+            for c in range(3, ws.max_column + 1):  # ab C
+                if is_numeric_like(ws.cell(row=r, column=c).value):
+                    first_data = r
+                    break
+            if first_data:
                 break
         if first_data is None:
             first_data = 1
@@ -380,62 +399,94 @@ def process_table2_or_3(table_no, raw_path, tmpl_ext, tmpl_int):
                 break
         return first_data, footnote_start
 
-    fdr_raw, ft_raw = detect_data_and_footer(ws_raw, numeric_col=START_COL)
+    fdr_raw, ft_raw = detect_data_and_footer(ws_raw)
 
-    def fill_numeric(ws_t):
+    def fill_from_raw(ws_t):
         is_sec = get_merged_secondary_checker(ws_t)
-        fdr_t, ft_t = detect_data_and_footer(ws_t, numeric_col=START_COL)
+        fdr_t, ft_t = detect_data_and_footer(ws_t)
 
         n_rows = min(ft_raw - fdr_raw, ft_t - fdr_t)
         for off in range(n_rows):
             r_raw = fdr_raw + off
             r_t = fdr_t + off
 
-            # FIX: ab Spalte B (START_COL) überschreiben
-            for c in range(START_COL, ws_t.max_column + 1):
+            # ab Spalte B überschreiben (damit Spalte B nicht aus Layout bleibt)
+            for c in range(START_COL_COPY, ws_t.max_column + 1):
                 if is_sec(r_t, c):
                     continue
                 ws_t.cell(row=r_t, column=c).value = ws_raw.cell(row=r_raw, column=c).value
 
-    # -------- EXTERN --------
-    wb_ext = load_layout(tmpl_ext)
-    ws_ext = wb_ext[wb_ext.sheetnames[0]]
-    ws_ext.cell(row=3, column=1).value = month_text
-    fill_numeric(ws_ext)
-    update_footer_with_stand_and_copyright(ws_ext, stand_text)
-
-    out_ext = out_path_for(raw_path, "_g")
-    wb_ext.save(out_ext)
-    print(f"  -> Extern: {out_ext}")
-
-    # -------- INTERN --------
+    # ---------- INTERN ----------
     wb_int = load_layout(tmpl_int)
     ws_int = wb_int[wb_int.sheetnames[0]]
     ws_int.cell(row=1, column=1).value = INTERNAL_HEADER_TEXT
     ws_int.cell(row=6, column=1).value = month_text
-    fill_numeric(ws_int)
+    fill_from_raw(ws_int)
     update_footer_with_stand_and_copyright(ws_int, stand_text)
 
     out_int = out_path_for(raw_path, "_INTERN")
     wb_int.save(out_int)
     print(f"  -> Intern: {out_int}")
 
+    # Tabelle 2/3: Prozentspalten (wie von dir zuletzt festgelegt)
+    if table_no in (2, 3):
+        # Tabelle 2 Spalte G (7), Tabelle 3 Spalte G (7) = Prozent
+        format_percent_column(ws_int, 7)
+        format_numeric_cells(ws_int, skip_cols={7})
+
+    # ---------- EXTERN ----------
+    if is_jj:
+        # JJ: extern = intern, nur ohne Kopfzeile + Markierung
+        wb_ext = wb_int
+        ws_ext = wb_ext[wb_ext.sheetnames[0]]
+        ws_ext.cell(row=1, column=1).value = None
+
+        fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+        if table_no == 2:
+            mark_cells_with_1_or_2(ws_ext, 5, fill)  # Tabelle 2: Spalte E
+        else:
+            mark_cells_with_1_or_2(ws_ext, 5, fill)  # Tabelle 3: Spalte E
+
+        out_ext = out_path_for(raw_path, "_g")
+        wb_ext.save(out_ext)
+        print(f"  -> Extern (JJ): {out_ext}")
+    else:
+        wb_ext = load_layout(tmpl_ext)
+        ws_ext = wb_ext[wb_ext.sheetnames[0]]
+        ws_ext.cell(row=3, column=1).value = month_text
+
+        # Tabelle 2: störende Zeile 4 (z.B. alter Monat) sicher leeren
+        if table_no == 2:
+            ws_ext.cell(row=4, column=1).value = None
+
+        fill_from_raw(ws_ext)
+        update_footer_with_stand_and_copyright(ws_ext, stand_text)
+
+        # Prozentspalte
+        if table_no in (2, 3):
+            format_percent_column(ws_ext, 7)
+            format_numeric_cells(ws_ext, skip_cols={7})
+
+        out_ext = out_path_for(raw_path, "_g")
+        wb_ext.save(out_ext)
+        print(f"  -> Extern: {out_ext}")
 
 
 # ------------------------------------------------------------
 # Tabelle 5 (5 Blätter)
 # ------------------------------------------------------------
 
-def build_table5_workbook(raw_path, template_path, internal_layout):
+def build_table5_workbook(raw_path, template_path, internal_layout, is_jj):
     wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
     ws_raw = wb_raw[RAW_SHEET_NAMES[5]]
 
-    month_text = extract_month_from_raw(ws_raw, 5)
+    month_text = find_month_text(ws_raw)
     stand_text = extract_stand_from_raw(ws_raw)
 
     wb = openpyxl.load_workbook(template_path)
     max_row = ws_raw.max_row
 
+    # Startzeilen je Block ("Bayern 1)" .. "Bayern 5)")
     starts = []
     for r in range(1, max_row + 1):
         v = ws_raw.cell(row=r, column=2).value
@@ -448,7 +499,7 @@ def build_table5_workbook(raw_path, template_path, internal_layout):
 
         last_nonempty = start
         for rr in range(start, end + 1):
-            if any(ws_raw.cell(row=rr, column=c).value not in (None, "") for c in range(1, 20)):
+            if any(ws_raw.cell(row=rr, column=c).value not in (None, "") for c in range(1, 25)):
                 last_nonempty = rr
         block_ranges.append((start, last_nonempty))
 
@@ -456,6 +507,7 @@ def build_table5_workbook(raw_path, template_path, internal_layout):
         is_sec = get_merged_secondary_checker(ws_t)
         max_row_t = ws_t.max_row
 
+        # Datenstart im Template: erste Zeile mit Numeric in Spalte C
         first_data_t = None
         for r in range(1, max_row_t + 1):
             if is_numeric_like(ws_t.cell(row=r, column=3).value):
@@ -464,17 +516,30 @@ def build_table5_workbook(raw_path, template_path, internal_layout):
         if first_data_t is None:
             return
 
+        # Kopierspalten:
+        # - Nicht-JJ: C..H (3..8)
+        # - JJ:      C..J (3..10)  -> Arbeitnehmer/Forderungen mitnehmen
+        if is_jj:
+            cols = range(3, 11)   # C..J
+        else:
+            cols = range(3, 9)    # C..H
+
         raw_r = start_row
         t_r = first_data_t
         while raw_r <= end_row and t_r <= max_row_t:
-            # FIX: Tab5 muss auch Arbeitnehmer & Forderungen übernehmen (nicht nur C..H)
-            # -> wir kopieren C..J
-            for c in range(3, 11):  # C..J
+            for c in cols:
                 if is_sec(t_r, c):
                     continue
                 ws_t.cell(row=t_r, column=c).value = ws_raw.cell(row=raw_r, column=c).value
             raw_r += 1
             t_r += 1
+
+        # Für Nicht-JJ: I/J sicher leer lassen
+        if not is_jj:
+            for rr in range(first_data_t, min(first_data_t + (end_row - start_row) + 1, max_row_t + 1)):
+                for cc in (9, 10):  # I/J
+                    if not is_sec(rr, cc):
+                        ws_t.cell(row=rr, column=cc).value = None
 
     for i, (start, end) in enumerate(block_ranges):
         if i >= len(wb.worksheets):
@@ -483,13 +548,14 @@ def build_table5_workbook(raw_path, template_path, internal_layout):
 
         if internal_layout:
             ws_t.cell(row=5, column=1).value = month_text
+            ws_t.cell(row=1, column=1).value = INTERNAL_HEADER_TEXT
         else:
             ws_t.cell(row=3, column=1).value = month_text
 
         fill_sheet_from_block(ws_t, start, end)
         update_footer_with_stand_and_copyright(ws_t, stand_text)
 
-        # Tabelle 5: Spalte H (8) = Kommaspalte
+        # Tabelle 5: Spalte H (8) = Prozent
         format_percent_column(ws_t, 8)
         format_numeric_cells(ws_t, skip_cols={8})
 
@@ -501,9 +567,8 @@ def process_table5(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
 
     wb_int = None
     if os.path.exists(tmpl_int_path):
-        wb_int = build_table5_workbook(raw_path, tmpl_int_path, internal_layout=True)
-        base = os.path.splitext(os.path.basename(raw_path))[0]
-        out_int = os.path.join(OUTPUT_DIR, base + "_INTERN.xlsx")
+        wb_int = build_table5_workbook(raw_path, tmpl_int_path, internal_layout=True, is_jj=is_jj)
+        out_int = out_path_for(raw_path, "_INTERN")
         wb_int.save(out_int)
         print(f"  -> Intern: {out_int}")
     else:
@@ -511,24 +576,22 @@ def process_table5(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
 
     if is_jj:
         if wb_int is None and os.path.exists(tmpl_int_path):
-            wb_int = build_table5_workbook(raw_path, tmpl_int_path, internal_layout=True)
+            wb_int = build_table5_workbook(raw_path, tmpl_int_path, internal_layout=True, is_jj=is_jj)
         if wb_int is not None:
             wb_ext = wb_int
             fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
 
             for ws_ext in wb_ext.worksheets:
                 ws_ext.cell(row=1, column=1).value = None
-                mark_cells_with_1_or_2(ws_ext, 6, fill)  # Tabelle 5 JJ: Spalte F
+                mark_cells_with_1_or_2(ws_ext, 6, fill)  # Tabelle 5: Spalte F
 
-            base = os.path.splitext(os.path.basename(raw_path))[0]
-            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            out_ext = out_path_for(raw_path, "_g")
             wb_ext.save(out_ext)
             print(f"  -> Extern (JJ): {out_ext}")
     else:
         if os.path.exists(tmpl_ext_path):
-            wb_ext = build_table5_workbook(raw_path, tmpl_ext_path, internal_layout=False)
-            base = os.path.splitext(os.path.basename(raw_path))[0]
-            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            wb_ext = build_table5_workbook(raw_path, tmpl_ext_path, internal_layout=False, is_jj=is_jj)
+            out_ext = out_path_for(raw_path, "_g")
             wb_ext.save(out_ext)
             print(f"  -> Extern: {out_ext}")
         else:
@@ -536,7 +599,7 @@ def process_table5(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
 
 
 # ------------------------------------------------------------
-# Sammelmappen erzeugen
+# Sammelmappen pro Periode
 # ------------------------------------------------------------
 
 def detect_period_from_filename(filename: str):
@@ -629,10 +692,7 @@ def main():
         pattern = f"Tabelle-{table_no}-Land_*.xlsx"
         candidates = sorted(glob.glob(pattern))
 
-        raw_files = [
-            f for f in candidates
-            if not f.endswith("_g.xlsx") and not f.endswith("_INTERN.xlsx")
-        ]
+        raw_files = [f for f in candidates if not f.endswith("_g.xlsx") and not f.endswith("_INTERN.xlsx")]
 
         if not raw_files:
             print(f"Keine Rohdateien für Tabelle {table_no} gefunden ({pattern}) – übersprungen.\n")
