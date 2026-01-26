@@ -1,21 +1,19 @@
 import os
-import re
 import glob
+import re
 from copy import copy as copy_style
 from datetime import datetime
 
 import openpyxl
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, PatternFill
 
 
 # ------------------------------------------------------------
-# Ordner / Layouts
+# Konfiguration
 # ------------------------------------------------------------
 
 LAYOUT_DIR = "Layouts"
 OUTPUT_DIR = "Ausgabedateien"
-
-INTERNAL_HEADER_TEXT = "NUR FÜR DEN INTERNEN DIENSTGEBRAUCH"
 
 RAW_SHEET_NAMES = {
     1: "XML-Tab1-Land",
@@ -24,7 +22,6 @@ RAW_SHEET_NAMES = {
     5: "XML-Tab5-Land",
 }
 
-# Layout-Dateien (liegen in ./Layouts/)
 TEMPLATES = {
     1: {"ext": "Tabelle-1-Layout_g.xlsx", "int": "Tabelle-1-Layout_INTERN.xlsx"},
     2: {"ext": "Tabelle-2-Layout_g.xlsx", "int": "Tabelle-2-Layout_INTERN.xlsx"},
@@ -34,40 +31,31 @@ TEMPLATES = {
 
 
 # ------------------------------------------------------------
-# Helper
+# Hilfsfunktionen
 # ------------------------------------------------------------
 
 def is_numeric_like(v):
-    """Erkennt Zahlen/Platzhalter in Zellen (inkl. '-', 'X', mit Punkt/Komma)."""
     if v is None:
         return False
     if isinstance(v, (int, float)):
         return True
     if isinstance(v, str):
-        s = v.strip()
-        if s in ("-", "X", ""):
-            return True
-        s2 = s.replace(".", "").replace(" ", "").replace(",", "")
-        return s2.isdigit()
+        s = v.strip().replace(".", "").replace(",", "")
+        return s.isdigit() or v.strip() in ["-", "X"]
     return False
 
 
 def extract_month_from_raw(ws, table_no):
-    """
-    Holt Monats-/Zeitraum-Text aus Rohblatt.
-    (Diese Positionen waren bei uns konsistent)
-    """
     if table_no == 1:
         return ws.cell(row=3, column=1).value
-    if table_no in (2, 3):
+    elif table_no in (2, 3):
         return ws.cell(row=4, column=1).value
-    if table_no == 5:
+    elif table_no == 5:
         return ws.cell(row=3, column=1).value
     return None
 
 
-def extract_stand_from_raw(ws, max_search_rows=60):
-    """Sucht 'Stand:' in den letzten Zeilen des Rohblatts."""
+def extract_stand_from_raw(ws, max_search_rows=40):
     max_row = ws.max_row
     max_col = ws.max_column
     for r in range(max_row, max(max_row - max_search_rows, 1) - 1, -1):
@@ -78,8 +66,63 @@ def extract_stand_from_raw(ws, max_search_rows=60):
     return None
 
 
+def update_footer_with_stand_and_copyright(ws, stand_text):
+    max_row = ws.max_row
+    max_col = ws.max_column
+    current_year = datetime.now().year
+
+    copyright_row = None
+    for r in range(max_row, 0, -1):
+        v = ws.cell(row=r, column=1).value
+        if isinstance(v, str) and "(C)opyright" in v:
+            text = v
+
+            def repl(_m):
+                return f"(C)opyright {current_year}"
+
+            new_text = re.sub(r"\(C\)opyright\s+\d{4}", repl, text)
+            ws.cell(row=r, column=1).value = new_text
+            copyright_row = r
+            break
+
+    if not copyright_row or not stand_text:
+        return
+
+    # Spalte finden, in der "Stand:" steht (falls vorhanden)
+    stand_col = None
+    for c in range(1, max_col + 1):
+        v = ws.cell(row=copyright_row, column=c).value
+        if isinstance(v, str) and "Stand:" in v:
+            stand_col = c
+            break
+
+    # Entferne andere "Stand:"-Vorkommen (außer in Copyright-Zeile)
+    for r in range(1, max_row + 1):
+        for c in range(1, max_col + 1):
+            v = ws.cell(row=r, column=c).value
+            if isinstance(v, str) and v.strip().startswith("Stand:") and r != copyright_row:
+                ws.cell(row=r, column=c).value = ""
+
+    if stand_col is None:
+        stand_col = max_col  # Fallback: letzte Spalte
+
+    cop_cell = ws.cell(row=copyright_row, column=1)
+    tgt = ws.cell(row=copyright_row, column=stand_col)
+    tgt.value = stand_text
+
+    # Stil wie Copyright
+    tgt.font = copy_style(cop_cell.font)
+    tgt.border = copy_style(cop_cell.border)
+    tgt.fill = copy_style(cop_cell.fill)
+    tgt.number_format = cop_cell.number_format
+    tgt.protection = copy_style(cop_cell.protection)
+    tgt.alignment = Alignment(
+        horizontal="right",
+        vertical=cop_cell.alignment.vertical if cop_cell.alignment else "center",
+    )
+
+
 def get_merged_secondary_checker(ws):
-    """True, wenn Zelle in Merge liegt aber NICHT die Top-Left-Zelle ist."""
     merged = list(ws.merged_cells.ranges)
 
     def is_secondary(row, col):
@@ -91,110 +134,142 @@ def get_merged_secondary_checker(ws):
     return is_secondary
 
 
-def update_footer_with_stand_and_copyright(ws, stand_text):
-    """
-    Aktualisiert:
-      - Copyright-Jahr -> aktuelles Jahr
-      - Stand-Text -> in die Stand-Spalte der Copyright-Zeile (oder letzte Spalte)
-      - entfernt doppelte Stand-Zeilen (falls irgendwo sonst im Blatt)
-    """
+def mark_cells_with_1_or_2(ws, col_index, fill):
     max_row = ws.max_row
-    max_col = ws.max_column
-    cy = datetime.now().year
+    for r in range(1, max_row + 1):
+        cell = ws.cell(row=r, column=col_index)
+        v = cell.value
+        if isinstance(v, (int, float)) and v in (1, 2):
+            cell.fill = fill
+        elif isinstance(v, str) and v.strip() in ("1", "2"):
+            cell.fill = fill
 
-    # Copyright-Zeile finden (Spalte A)
-    copyright_row = None
-    for r in range(max_row, 0, -1):
-        v = ws.cell(row=r, column=1).value
-        if isinstance(v, str) and ("(C)opyright" in v or "Copyright" in v):
-            # Jahr ersetzen/setzen
-            txt = v
-            txt = re.sub(r"\(C\)opyright\s+\d{4}", f"(C)opyright {cy}", txt)
-            if "(C)opyright" not in txt:
-                txt = f"(C)opyright {cy} Bayerisches Landesamt für Statistik"
-            ws.cell(row=r, column=1).value = txt
-            copyright_row = r
-            break
 
-    if copyright_row is None:
-        # keine Copyrightzeile: am Ende Leerzeile + Zeile einfügen
-        ws.append([])
-        ws.append([])
-        copyright_row = ws.max_row
-        ws.cell(row=copyright_row, column=1).value = f"(C)opyright {cy} Bayerisches Landesamt für Statistik"
+def format_numeric_cells(ws, skip_cols=None):
+    """
+    Ganzzahlen mit festem Leerzeichen als Tausendertrennzeichen,
+    ohne Dezimalstellen.
 
-    # andere Stand:-Vorkommen entfernen
+    Regeln:
+    - 0 bleibt 0
+    - Zellen mit "-" oder "X" ignorieren
+    - Prozent-/Kommaspalten über skip_cols ausschließen
+    - Negative Zahlen: "- " + Zahl (Minus + genau ein Leerzeichen)
+    """
+    if skip_cols is None:
+        skip_cols = set()
+
+    # feste Gruppierung mit Leerzeichen (auch für Millionen+)
+    pos = "#\\ ###\\ ###\\ ###\\ ###\\ ##0"
+    neg = "-\\ " + pos
+    thousands_format = f"{pos};{neg};0"
+
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.column in skip_cols:
+                continue
+
+            v = cell.value
+            if v in ("-", "X"):
+                continue
+
+            if isinstance(v, (int, float)):
+                if isinstance(v, float):
+                    cell.value = int(round(v))
+                cell.number_format = thousands_format
+
+
+def format_percent_column(ws, col_index: int):
+    """
+    Kommaspalte (Prozentwerte ohne %-Zeichen): immer 1 Nachkommastelle,
+    außer 0 -> 0.
+    Ignoriert "-", "X" und leere Zellen.
+    """
+    pct_fmt = "0.0;-0.0;0"
     for r in range(1, ws.max_row + 1):
-        for c in range(1, max_col + 1):
-            v = ws.cell(row=r, column=c).value
-            if isinstance(v, str) and v.strip().startswith("Stand:") and r != copyright_row:
-                ws.cell(row=r, column=c).value = ""
-
-    if not stand_text:
-        return
-
-    # Stand-Spalte suchen (in Copyright-Zeile), sonst letzte Spalte
-    stand_col = None
-    for c in range(1, max_col + 1):
-        v = ws.cell(row=copyright_row, column=c).value
-        if isinstance(v, str) and "Stand:" in v:
-            stand_col = c
-            break
-    if stand_col is None:
-        stand_col = max_col
-
-    # Stil von Copyright-Zelle übernehmen
-    cop_cell = ws.cell(row=copyright_row, column=1)
-    tgt = ws.cell(row=copyright_row, column=stand_col)
-    tgt.value = stand_text.strip()
-
-    tgt.font = copy_style(cop_cell.font)
-    tgt.border = copy_style(cop_cell.border)
-    tgt.fill = copy_style(cop_cell.fill)
-    tgt.number_format = cop_cell.number_format
-    tgt.protection = copy_style(cop_cell.protection)
-    tgt.alignment = Alignment(horizontal="right",
-                             vertical=cop_cell.alignment.vertical if cop_cell.alignment else "center")
-
-    # falls doppelt "Stand:" im Text
-    if isinstance(tgt.value, str) and tgt.value.count("Stand:") > 1:
-        i = tgt.value.find("Stand:")
-        tgt.value = "Stand:" + tgt.value[i + len("Stand:"):].strip()
+        cell = ws.cell(row=r, column=col_index)
+        v = cell.value
+        if v is None or v in ("-", "X"):
+            continue
+        if isinstance(v, (int, float)):
+            cell.number_format = pct_fmt
 
 
-def out_path_for(raw_path, suffix):
-    """Schreibt in OUTPUT_DIR"""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    base = os.path.basename(raw_path).replace(".xlsx", f"{suffix}.xlsx")
-    return os.path.join(OUTPUT_DIR, base)
+# ------------------------------------------------------------
+# Copy Sheet robust (für Sammelmappen)
+# ------------------------------------------------------------
 
+def copy_sheet_to_workbook(src_ws, tgt_wb, new_title: str):
+    """
+    Kopiert ein Worksheet inkl. Werte, Dimensionen, Merges und Styles.
+    WICHTIG: Keine _style-Objekte zwischen Workbooks kopieren (openpyxl-Bugquelle).
+    """
+    tgt_ws = tgt_wb.create_sheet(title=new_title)
 
-def load_layout(path_in_layouts):
-    p = os.path.join(LAYOUT_DIR, path_in_layouts)
-    if not os.path.exists(p):
-        raise FileNotFoundError(f"Layout-Datei fehlt: {p}")
-    return openpyxl.load_workbook(p)
+    # Freeze Panes
+    tgt_ws.freeze_panes = src_ws.freeze_panes
+
+    # Spalten-Dimensionen
+    for col_key, dim in src_ws.column_dimensions.items():
+        tdim = tgt_ws.column_dimensions[col_key]
+        tdim.width = dim.width
+        tdim.hidden = dim.hidden
+        tdim.outline_level = dim.outline_level
+        tdim.collapsed = dim.collapsed
+
+    # Zeilen-Dimensionen
+    for row_idx, dim in src_ws.row_dimensions.items():
+        rdim = tgt_ws.row_dimensions[row_idx]
+        rdim.height = dim.height
+        rdim.hidden = dim.hidden
+        rdim.outline_level = dim.outline_level
+        rdim.collapsed = dim.collapsed
+
+    # Zellen inkl. Styles (sauber, ohne _style)
+    for row in src_ws.iter_rows():
+        for cell in row:
+            tgt_cell = tgt_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            tgt_cell.font = copy_style(cell.font)
+            tgt_cell.border = copy_style(cell.border)
+            tgt_cell.fill = copy_style(cell.fill)
+            tgt_cell.number_format = cell.number_format
+            tgt_cell.protection = copy_style(cell.protection)
+            tgt_cell.alignment = copy_style(cell.alignment)
+
+    # Merges
+    for merged_range in src_ws.merged_cells.ranges:
+        tgt_ws.merge_cells(str(merged_range))
+
+    return tgt_ws
 
 
 # ------------------------------------------------------------
 # Tabelle 1
 # ------------------------------------------------------------
 
-def process_table1(raw_path, tmpl_ext, tmpl_int):
-    print(f"Verarbeite Tabelle 1 aus '{os.path.basename(raw_path)}' ...")
-
+def build_table1_workbook(raw_path, template_path, internal_layout):
     wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
     ws_raw = wb_raw[RAW_SHEET_NAMES[1]]
 
     month_text = extract_month_from_raw(ws_raw, 1)
     stand_text = extract_stand_from_raw(ws_raw)
 
-    # Daten- und Fußnotenbereich bestimmen
-    def detect_data_and_footer(ws, numeric_col=4):
-        max_row = ws.max_row
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb[wb.sheetnames[0]]
+
+    if internal_layout:
+        ws.cell(row=5, column=1).value = month_text
+    else:
+        ws.cell(row=3, column=1).value = month_text
+
+    is_sec = get_merged_secondary_checker(ws)
+    max_col_ws = ws.max_column
+
+    def detect_data_and_footer(sheet, numeric_col=4):
+        max_row = sheet.max_row
         first_data = None
         for r in range(1, max_row + 1):
-            if is_numeric_like(ws.cell(row=r, column=numeric_col).value):
+            if is_numeric_like(sheet.cell(row=r, column=numeric_col).value):
                 first_data = r
                 break
         if first_data is None:
@@ -202,60 +277,72 @@ def process_table1(raw_path, tmpl_ext, tmpl_int):
 
         footnote_start = max_row + 1
         for r in range(1, max_row + 1):
-            v = ws.cell(row=r, column=1).value
+            v = sheet.cell(row=r, column=1).value
             if isinstance(v, str) and v.strip().startswith("-"):
                 footnote_start = r
                 break
         return first_data, footnote_start
 
     fdr_raw, ft_raw = detect_data_and_footer(ws_raw, numeric_col=4)
+    fdr_t, ft_t = detect_data_and_footer(ws, numeric_col=4)
 
-    # -------- EXTERN --------
-    wb_ext = load_layout(tmpl_ext)
-    ws_ext = wb_ext[wb_ext.sheetnames[0]]
-    ws_ext.cell(row=3, column=1).value = month_text
+    n_rows = min(ft_raw - fdr_raw, ft_t - fdr_t)
 
-    is_sec = get_merged_secondary_checker(ws_ext)
-    fdr_ext, ft_ext = detect_data_and_footer(ws_ext, numeric_col=4)
-
-    n_rows = min(ft_raw - fdr_raw, ft_ext - fdr_ext)
-    for off in range(n_rows):
-        r_raw = fdr_raw + off
-        r_ext = fdr_ext + off
-        for c in range(1, ws_ext.max_column + 1):
-            if is_sec(r_ext, c):
+    for offset in range(n_rows):
+        r_raw = fdr_raw + offset
+        r_t = fdr_t + offset
+        for c in range(1, max_col_ws + 1):
+            if is_sec(r_t, c):
                 continue
-            ws_ext.cell(row=r_ext, column=c).value = ws_raw.cell(row=r_raw, column=c).value
+            ws.cell(row=r_t, column=c).value = ws_raw.cell(row=r_raw, column=c).value
 
-    update_footer_with_stand_and_copyright(ws_ext, stand_text)
+    update_footer_with_stand_and_copyright(ws, stand_text)
 
-    out_ext = out_path_for(raw_path, "_g")
-    wb_ext.save(out_ext)
-    print(f"  -> Extern: {out_ext}")
+    # Tabelle 1: Spalte I (9) = Kommaspalte
+    format_percent_column(ws, 9)
+    format_numeric_cells(ws, skip_cols={9})
 
-    # -------- INTERN --------
-    wb_int = load_layout(tmpl_int)
-    ws_int = wb_int[wb_int.sheetnames[0]]
-    ws_int.cell(row=1, column=1).value = INTERNAL_HEADER_TEXT
-    ws_int.cell(row=5, column=1).value = month_text
+    return wb
 
-    is_sec_i = get_merged_secondary_checker(ws_int)
-    fdr_int, ft_int = detect_data_and_footer(ws_int, numeric_col=4)
 
-    n_rows = min(ft_raw - fdr_raw, ft_int - fdr_int)
-    for off in range(n_rows):
-        r_raw = fdr_raw + off
-        r_int = fdr_int + off
-        for c in range(1, ws_int.max_column + 1):
-            if is_sec_i(r_int, c):
-                continue
-            ws_int.cell(row=r_int, column=c).value = ws_raw.cell(row=r_raw, column=c).value
+def process_table1(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
+    print(f"Verarbeite Tabelle 1 aus '{raw_path}' ...")
 
-    update_footer_with_stand_and_copyright(ws_int, stand_text)
+    wb_int = None
+    if os.path.exists(tmpl_int_path):
+        wb_int = build_table1_workbook(raw_path, tmpl_int_path, internal_layout=True)
+        base = os.path.splitext(os.path.basename(raw_path))[0]
+        out_int = os.path.join(OUTPUT_DIR, base + "_INTERN.xlsx")
+        wb_int.save(out_int)
+        print(f"  -> Intern: {out_int}")
+    else:
+        print(f"  [WARNUNG] Vorlage intern nicht gefunden: {tmpl_int_path}")
 
-    out_int = out_path_for(raw_path, "_INTERN")
-    wb_int.save(out_int)
-    print(f"  -> Intern: {out_int}")
+    if is_jj:
+        # _g soll wie INTERN sein, nur ohne "NUR FÜR..." in Zeile 1 + Markierung
+        if wb_int is None and os.path.exists(tmpl_int_path):
+            wb_int = build_table1_workbook(raw_path, tmpl_int_path, internal_layout=True)
+        if wb_int is not None:
+            wb_ext = wb_int
+            ws_ext = wb_ext[wb_ext.sheetnames[0]]
+            ws_ext.cell(row=1, column=1).value = None
+
+            fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+            mark_cells_with_1_or_2(ws_ext, 7, fill)  # Tabelle 1: Spalte G
+
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            wb_ext.save(out_ext)
+            print(f"  -> Extern (JJ): {out_ext}")
+    else:
+        if os.path.exists(tmpl_ext_path):
+            wb_ext = build_table1_workbook(raw_path, tmpl_ext_path, internal_layout=False)
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            wb_ext.save(out_ext)
+            print(f"  -> Extern: {out_ext}")
+        else:
+            print(f"  [WARNUNG] Vorlage extern nicht gefunden: {tmpl_ext_path}")
 
 
 # ------------------------------------------------------------
@@ -334,22 +421,21 @@ def process_table2_or_3(table_no, raw_path, tmpl_ext, tmpl_int):
     print(f"  -> Intern: {out_int}")
 
 
+
 # ------------------------------------------------------------
-# Tabelle 5 (5 Blätter / 5 Blöcke)
+# Tabelle 5 (5 Blätter)
 # ------------------------------------------------------------
 
-def process_table5(raw_path, tmpl_ext, tmpl_int):
-    print(f"Verarbeite Tabelle 5 aus '{os.path.basename(raw_path)}' ...")
-
+def build_table5_workbook(raw_path, template_path, internal_layout):
     wb_raw = openpyxl.load_workbook(raw_path, data_only=True)
     ws_raw = wb_raw[RAW_SHEET_NAMES[5]]
 
     month_text = extract_month_from_raw(ws_raw, 5)
     stand_text = extract_stand_from_raw(ws_raw)
 
+    wb = openpyxl.load_workbook(template_path)
     max_row = ws_raw.max_row
 
-    # Blockstart via "Bayern x)" in Spalte B
     starts = []
     for r in range(1, max_row + 1):
         v = ws_raw.cell(row=r, column=2).value
@@ -359,19 +445,19 @@ def process_table5(raw_path, tmpl_ext, tmpl_int):
     block_ranges = []
     for i, start in enumerate(starts):
         end = (starts[i + 1] - 1) if i < len(starts) - 1 else max_row
+
         last_nonempty = start
-        for r in range(start, end + 1):
-            if any(ws_raw.cell(row=r, column=c).value not in (None, "") for c in range(1, 12)):
-                last_nonempty = r
+        for rr in range(start, end + 1):
+            if any(ws_raw.cell(row=rr, column=c).value not in (None, "") for c in range(1, 20)):
+                last_nonempty = rr
         block_ranges.append((start, last_nonempty))
 
-    # kopiert nur Zahlen C..H
     def fill_sheet_from_block(ws_t, start_row, end_row):
         is_sec = get_merged_secondary_checker(ws_t)
+        max_row_t = ws_t.max_row
 
-        # erste Datenzeile im Template: erste Zeile mit numerischem Wert in Spalte 3
         first_data_t = None
-        for r in range(1, ws_t.max_row + 1):
+        for r in range(1, max_row_t + 1):
             if is_numeric_like(ws_t.cell(row=r, column=3).value):
                 first_data_t = r
                 break
@@ -380,42 +466,153 @@ def process_table5(raw_path, tmpl_ext, tmpl_int):
 
         raw_r = start_row
         t_r = first_data_t
-        while raw_r <= end_row and t_r <= ws_t.max_row:
-            for c in range(3, 9):  # C..H
+        while raw_r <= end_row and t_r <= max_row_t:
+            # FIX: Tab5 muss auch Arbeitnehmer & Forderungen übernehmen (nicht nur C..H)
+            # -> wir kopieren C..J
+            for c in range(3, 11):  # C..J
                 if is_sec(t_r, c):
                     continue
                 ws_t.cell(row=t_r, column=c).value = ws_raw.cell(row=raw_r, column=c).value
             raw_r += 1
             t_r += 1
 
-    # -------- EXTERN --------
-    wb_ext = load_layout(tmpl_ext)
     for i, (start, end) in enumerate(block_ranges):
-        if i >= len(wb_ext.worksheets):
+        if i >= len(wb.worksheets):
             break
-        ws_t = wb_ext.worksheets[i]
-        ws_t.cell(row=3, column=1).value = month_text
+        ws_t = wb.worksheets[i]
+
+        if internal_layout:
+            ws_t.cell(row=5, column=1).value = month_text
+        else:
+            ws_t.cell(row=3, column=1).value = month_text
+
         fill_sheet_from_block(ws_t, start, end)
         update_footer_with_stand_and_copyright(ws_t, stand_text)
 
-    out_ext = out_path_for(raw_path, "_g")
-    wb_ext.save(out_ext)
-    print(f"  -> Extern: {out_ext}")
+        # Tabelle 5: Spalte H (8) = Kommaspalte
+        format_percent_column(ws_t, 8)
+        format_numeric_cells(ws_t, skip_cols={8})
 
-    # -------- INTERN --------
-    wb_int = load_layout(tmpl_int)
-    for i, (start, end) in enumerate(block_ranges):
-        if i >= len(wb_int.worksheets):
-            break
-        ws_t = wb_int.worksheets[i]
-        ws_t.cell(row=1, column=1).value = INTERNAL_HEADER_TEXT
-        ws_t.cell(row=5, column=1).value = month_text
-        fill_sheet_from_block(ws_t, start, end)
-        update_footer_with_stand_and_copyright(ws_t, stand_text)
+    return wb
 
-    out_int = out_path_for(raw_path, "_INTERN")
-    wb_int.save(out_int)
-    print(f"  -> Intern: {out_int}")
+
+def process_table5(raw_path, tmpl_ext_path, tmpl_int_path, is_jj):
+    print(f"Verarbeite Tabelle 5 aus '{raw_path}' ...")
+
+    wb_int = None
+    if os.path.exists(tmpl_int_path):
+        wb_int = build_table5_workbook(raw_path, tmpl_int_path, internal_layout=True)
+        base = os.path.splitext(os.path.basename(raw_path))[0]
+        out_int = os.path.join(OUTPUT_DIR, base + "_INTERN.xlsx")
+        wb_int.save(out_int)
+        print(f"  -> Intern: {out_int}")
+    else:
+        print(f"  [WARNUNG] Vorlage intern nicht gefunden: {tmpl_int_path}")
+
+    if is_jj:
+        if wb_int is None and os.path.exists(tmpl_int_path):
+            wb_int = build_table5_workbook(raw_path, tmpl_int_path, internal_layout=True)
+        if wb_int is not None:
+            wb_ext = wb_int
+            fill = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+
+            for ws_ext in wb_ext.worksheets:
+                ws_ext.cell(row=1, column=1).value = None
+                mark_cells_with_1_or_2(ws_ext, 6, fill)  # Tabelle 5 JJ: Spalte F
+
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            wb_ext.save(out_ext)
+            print(f"  -> Extern (JJ): {out_ext}")
+    else:
+        if os.path.exists(tmpl_ext_path):
+            wb_ext = build_table5_workbook(raw_path, tmpl_ext_path, internal_layout=False)
+            base = os.path.splitext(os.path.basename(raw_path))[0]
+            out_ext = os.path.join(OUTPUT_DIR, base + "_g.xlsx")
+            wb_ext.save(out_ext)
+            print(f"  -> Extern: {out_ext}")
+        else:
+            print(f"  [WARNUNG] Vorlage extern nicht gefunden: {tmpl_ext_path}")
+
+
+# ------------------------------------------------------------
+# Sammelmappen erzeugen
+# ------------------------------------------------------------
+
+def detect_period_from_filename(filename: str):
+    name = os.path.basename(filename)
+
+    m = re.search(r"(20\d{2}-(?:0[1-9]|1[0-2]))", name)
+    if m:
+        return m.group(1)
+
+    m = re.search(r"(20\d{2}-Q[1-4])", name)
+    if m:
+        return m.group(1)
+
+    m = re.search(r"(20\d{2}-H[12])", name)
+    if m:
+        return m.group(1)
+
+    m = re.search(r"(20\d{2}-JJ)", name)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+def build_collection_workbook(period: str, suffix: str):
+    def find_one(table_no):
+        pattern = os.path.join(OUTPUT_DIR, f"Tabelle-{table_no}-Land_*{period}*{suffix}.xlsx")
+        hits = sorted(glob.glob(pattern))
+        return hits[0] if hits else None
+
+    f1 = find_one(1)
+    f2 = find_one(2)
+    f3 = find_one(3)
+    f5 = find_one(5)
+
+    missing = [t for t, f in [(1, f1), (2, f2), (3, f3), (5, f5)] if f is None]
+    if missing:
+        print(f"[SAMMEL] Periode {period} ({suffix}): fehlende Dateien für Tabellen {missing} – Sammelmappe wird übersprungen.")
+        return
+
+    print(f"[SAMMEL] baue Periode={period}, Typ={suffix}")
+    print("         Dateien:", f1, f2, f3, f5)
+
+    out_wb = openpyxl.Workbook()
+    out_wb.remove(out_wb.active)
+
+    for path in [f1, f2, f3]:
+        wb = openpyxl.load_workbook(path)
+        ws = wb[wb.sheetnames[0]]
+        copy_sheet_to_workbook(ws, out_wb, ws.title)
+
+    wb5 = openpyxl.load_workbook(f5)
+    for ws in wb5.worksheets:
+        copy_sheet_to_workbook(ws, out_wb, ws.title)
+
+    tag = "g" if suffix == "_g" else "INTERN"
+    out_path = os.path.join(OUTPUT_DIR, f"INSO_Land_{period}_SAMMEL_{tag}.xlsx")
+
+    print(f"[SAMMEL] speichere: {out_path}")
+    out_wb.save(out_path)
+    print(f"[SAMMEL] erstellt:  {out_path}")
+
+
+def build_all_collections():
+    files = glob.glob(os.path.join(OUTPUT_DIR, "*.xlsx"))
+    periods = set()
+
+    for f in files:
+        if f.endswith("_g.xlsx") or f.endswith("_INTERN.xlsx"):
+            p = detect_period_from_filename(f)
+            if p:
+                periods.add(p)
+
+    for p in sorted(periods):
+        build_collection_workbook(p, "_g")
+        build_collection_workbook(p, "_INTERN")
 
 
 # ------------------------------------------------------------
@@ -424,8 +621,7 @@ def process_table5(raw_path, tmpl_ext, tmpl_int):
 
 def main():
     print("Starte Tabellen-Formatter (1,2,3,5 – INTERN & EXTERN)...")
-    print(f"Arbeitsverzeichnis: {os.getcwd()}")
-    print()
+    print(f"Arbeitsverzeichnis: {os.getcwd()}\n")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -433,7 +629,6 @@ def main():
         pattern = f"Tabelle-{table_no}-Land_*.xlsx"
         candidates = sorted(glob.glob(pattern))
 
-        # nur Rohdateien
         raw_files = [
             f for f in candidates
             if not f.endswith("_g.xlsx") and not f.endswith("_INTERN.xlsx")
@@ -443,22 +638,39 @@ def main():
             print(f"Keine Rohdateien für Tabelle {table_no} gefunden ({pattern}) – übersprungen.\n")
             continue
 
-        tmpl = TEMPLATES[table_no]
-        tmpl_ext = tmpl["ext"]
-        tmpl_int = tmpl["int"]
+        tmpl_info = TEMPLATES.get(table_no)
+        if not tmpl_info:
+            print(f"[WARNUNG] Keine Vorlagenkonfiguration für Tabelle {table_no}.\n")
+            continue
+
+        tmpl_ext = os.path.join(LAYOUT_DIR, tmpl_info["ext"])
+        tmpl_int = os.path.join(LAYOUT_DIR, tmpl_info["int"])
 
         for raw_path in raw_files:
+            base_name = os.path.splitext(os.path.basename(raw_path))[0]
+            is_jj = "-JJ" in base_name
+
             if table_no == 1:
-                process_table1(raw_path, tmpl_ext, tmpl_int)
+                process_table1(raw_path, tmpl_ext, tmpl_int, is_jj)
             elif table_no in (2, 3):
-                process_table2_or_3(table_no, raw_path, tmpl_ext, tmpl_int)
+                process_table2_or_3(table_no, raw_path, tmpl_ext, tmpl_int, is_jj)
             elif table_no == 5:
-                process_table5(raw_path, tmpl_ext, tmpl_int)
+                process_table5(raw_path, tmpl_ext, tmpl_int, is_jj)
 
             print()
 
-    print("Fertig. 🎉")
+    print("Erzeuge Sammelmappen pro Periode (_g / _INTERN)...")
+    build_all_collections()
+
+    print("\nFertig. 🎉")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print("\nFEHLER AUFGETRETEN:")
+        print(e)
+    finally:
+        print("\n--- Ende der Verarbeitung ---")
+        input("Bitte Eingabetaste drücken, um das Fenster zu schließen...")
